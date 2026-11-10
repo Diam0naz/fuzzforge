@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+#
+# Replay exactly one failing case from a Fuzzforge report.
+#
+# Contract:
+#   exit 0  -> the case does NOT reproduce
+#   exit 42 -> the case still violates the invariant
+#   anything else -> replay failed; the minimizer treats it as "not reproduced"
+#
+# Trident 0.12 cases are replayable because the fuzzer prints an iteration seed
+# with every failure. The seed is stored in `reproducer` as
+# `{"test":"fuzz_0","seed":"<64 hex>"}` and replayed with
+# `trident fuzz debug <test> <seed>`.
+#
+# TRIDENT_REPRO_CMD overrides the built-in replay. It must exit 0 when the case
+# still reproduces (by the caller's convention), and is useful for older
+# Trident versions with a different replay API.
+
+set -uo pipefail
+
+case_file=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --case)
+            case_file="${2:-}"
+            shift 2
+            ;;
+        *)
+            case_file="$1"
+            shift
+            ;;
+    esac
+done
+
+if [ -z "$case_file" ] || [ ! -f "$case_file" ]; then
+    printf 'case file not found: %s\n' "${case_file:-<none>}" >&2
+    exit 64
+fi
+
+OUT="${FUZZFORGE_OUT:-/out}"
+IN="${FUZZFORGE_IN:-/in}"
+WORK="${FUZZFORGE_WORK:-/work}"
+TRIDENT_BIN="${TRIDENT_BIN:-trident}"
+
+log() { printf '[fuzzforge-reproduce] %s\n' "$*" >&2; }
+
+invariant="$(jq -r '.invariant // ""' "$case_file" 2>/dev/null)"
+reproducer="$(jq -r '.reproducer // ""' "$case_file" 2>/dev/null)"
+test_name="$(jq -r '.test // ""' "$case_file" 2>/dev/null)"
+seed=""
+
+# `reproducer` is a JSON string in current reports. Accept a bare seed (and a
+# bare JSON object) too so older reports remain replayable.
+case "$reproducer" in
+    \{*)
+        seed="$(jq -r '.seed // ""' <<<"$reproducer" 2>/dev/null)"
+        if [ -z "$test_name" ]; then
+            test_name="$(jq -r '.test // ""' <<<"$reproducer" 2>/dev/null)"
+        fi
+        ;;
+    *)
+        seed="$reproducer"
+        ;;
+esac
+
+mkdir -p "$OUT" 2>/dev/null || true
+cp "$case_file" "$OUT/repro-case.json" 2>/dev/null || true
+
+if [ -n "${TRIDENT_REPRO_CMD:-}" ]; then
+    printf 'replaying one case for invariant: %s\n' "$invariant" >&2
+    FUZZFORGE_IN="$IN" \
+    FUZZFORGE_OUT="$OUT" \
+    FUZZFORGE_WORK="$WORK" \
+    FUZZFORGE_INVARIANT="$invariant" \
+    FUZZFORGE_REPRODUCER="$reproducer" \
+    FUZZFORGE_CASE_JSON="$case_file" \
+        bash -c "$TRIDENT_REPRO_CMD" >"$OUT/repro.log" 2>&1
+    status=$?
+
+    if [ "$status" -eq 0 ]; then
+        exit 42
+    fi
+    exit 0
+fi
+
+if ! printf '%s' "$seed" | grep -qE '^[0-9a-fA-F]{64}$'; then
+    printf 'case has no replayable 32-byte seed: %s\n' "${seed:-<none>}" >&2
+    printf 'Set TRIDENT_REPRO_CMD on the image for this Trident version.\n' >&2
+    exit 64
+fi
+
+# Locate the project: /in is either a project directory or a stored archive.
+source_dir="$IN"
+mkdir -p "$WORK/project" 2>/dev/null || true
+if [ -f "$IN" ]; then
+    source_dir="$WORK/bundle"
+    mkdir -p "$source_dir"
+    case "$IN" in
+        *.tar.gz | *.tgz)
+            tar -xzf "$IN" -C "$source_dir" --no-same-owner --no-same-permissions || {
+                log "could not extract $IN"
+                exit 65
+            }
+            ;;
+        *)
+            tar -xf "$IN" -C "$source_dir" --no-same-owner --no-same-permissions || {
+                log "could not extract $IN"
+                exit 65
+            }
+            ;;
+    esac
+fi
+
+root="$(find "$source_dir" -maxdepth 3 -type f -name Anchor.toml -printf '%h\n' 2>/dev/null | head -n 1)"
+if [ -z "$root" ]; then
+    log "no Anchor.toml found under $source_dir"
+    exit 65
+fi
+
+rm -rf "$WORK/project"
+mkdir -p "$WORK/project"
+cp -a "$root/." "$WORK/project/" || {
+    log "could not copy project into $WORK"
+    exit 70
+}
+
+project="$WORK/project"
+run_dir="$project"
+if [ -f "$project/trident-tests/Trident.toml" ]; then
+    run_dir="$project/trident-tests"
+fi
+
+if [ -z "$test_name" ]; then
+    test_name="$(find "$run_dir" -mindepth 2 -maxdepth 2 -type f -name test_fuzz.rs -printf '%h\n' 2>/dev/null \
+        | xargs -r -n 1 basename | sort | head -n 1)"
+fi
+if [ -z "$test_name" ]; then
+    test_name="$(find "$project/trident-tests/fuzz_tests" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null \
+        | sort | head -n 1)"
+fi
+if [ -z "$test_name" ]; then
+    printf 'could not determine which fuzz test to replay\n' >&2
+    exit 64
+fi
+
+cd "$run_dir" || exit 70
+printf 'replaying %s with seed %s for invariant: %s\n' "$test_name" "$seed" "$invariant" >&2
+
+cmdline="$(printf '%q ' "$TRIDENT_BIN" fuzz debug "$test_name" "$seed")"
+if command -v script >/dev/null 2>&1; then
+    TRIDENT_WITH_EXIT_CODE=1 script -qec "$cmdline" /dev/null >"$OUT/repro.log" 2>&1
+else
+    TRIDENT_WITH_EXIT_CODE=1 "${TRIDENT_BIN}" fuzz debug "$test_name" "$seed" >"$OUT/repro.log" 2>&1
+fi
+status=$?
+
+# 99 is Trident's "failure observed" exit code with --with-exit-code. The log
+# is the backup signal because older builds exit 0 from debug mode.
+if [ "$status" -eq 99 ] || grep -aqE 'Assertion failed|panicked at' "$OUT/repro.log" 2>/dev/null; then
+    exit 42
+fi
+exit 0

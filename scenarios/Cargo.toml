@@ -1,0 +1,22 @@
+[package]
+name = "fuzzforge-scenarios"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+license = "MIT"
+description = "Reusable hostile-scenario library for Crucible harnesses: Token-2022 mint matrix, extension-aware token helpers, invariant ledgers."
+
+# Standalone: Crucible's LiteSVM dependency graph must not unify with the
+# fuzzforge API/worker workspace.
+[workspace]
+
+[dependencies]
+crucible-test-context = { git = "https://github.com/asymmetric-research/crucible", rev = "26c23914548035d51b86e885e86f5e3ebafb88ee" }
+spl-token-2022-interface = "2.1"
+spl-associated-token-account-interface = "2.0"
+solana-pubkey = "3.0"
+solana-keypair = "3.0"
+solana-signer = "3.0"
+solana-instruction = "3.0"
+anyhow = "1"
+sha2 = "0.10"

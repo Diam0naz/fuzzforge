@@ -1,0 +1,23 @@
+target/
+node_modules/
+.next/
+out/
+data/
+*.log
+.env
+.DS_Store
+examples/sample-bundle.tar.gz
+
+# Crucible harness artifacts (minimized findings live in targets/*/findings)
+crashes/
+crashes-*/
+.fuzz-cache/
+corpus/
+
+# Local agent/editor tooling
+.claude/
+.agents/
+.opencode/
+opencode.json
+*.tsbuildinfo
+skills-lock.json

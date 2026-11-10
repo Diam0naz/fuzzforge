@@ -1,0 +1,275 @@
+#!/usr/bin/env bash
+#
+# Sandbox entrypoint: run one Trident campaign and translate its result into
+# the version-agnostic /out/result.json contract.
+#
+# THIS FILE IS THE SEAM. Trident's CLI and artifact layout change between
+# releases. Everything else in Fuzzforge (queue, sandbox flags, report) does
+# not care which version is installed, but this adapter must be re-checked
+# whenever TRIDENT_VERSION is bumped.
+
+set -uo pipefail
+
+IN="${FUZZFORGE_IN:-/in}"
+OUT="${FUZZFORGE_OUT:-/out}"
+WORK="${FUZZFORGE_WORK:-/work}"
+TRIDENT_BIN="${TRIDENT_BIN:-trident}"
+
+log() { printf '[fuzzforge] %s\n' "$*" >&2; }
+
+write_error() {
+    local message="$1"
+    jq -n \
+        --arg message "$message" \
+        '{
+            executions: 0,
+            trident_version: null,
+            failures: [{
+                invariant: "sandbox error",
+                reproducer: $message,
+                note: "the sandbox did not complete a fuzz run",
+                minimized: false
+            }],
+            log_tail: $message
+        }' >"$OUT/result.json" 2>/dev/null
+}
+
+mkdir -p "$OUT" "$WORK/project" 2>/dev/null || true
+if [ ! -w "$OUT" ]; then
+    log "/out is not writable"
+    exit 70
+fi
+
+# /in can be a project directory (the reproduction command mounts $PWD) or a
+# bundle archive (the worker mounts the stored tarball). Extract an archive
+# into the tmpfs work directory; it was validated at intake, and even a
+# malicious archive stays inside the disposable container.
+source_dir="$IN"
+if [ -f "$IN" ]; then
+    source_dir="$WORK/bundle"
+    mkdir -p "$source_dir"
+    case "$IN" in
+        *.tar.gz | *.tgz)
+            if ! tar -xzf "$IN" -C "$source_dir" --no-same-owner --no-same-permissions; then
+                log "could not extract $IN"
+                write_error "could not extract the bundle archive inside the sandbox"
+                exit 65
+            fi
+            ;;
+        *)
+            if ! tar -xf "$IN" -C "$source_dir" --no-same-owner --no-same-permissions; then
+                log "could not extract $IN"
+                write_error "could not extract the bundle archive inside the sandbox"
+                exit 65
+            fi
+            ;;
+    esac
+fi
+
+# Accept either a project at the archive root or one wrapped in a single
+# directory.
+root="$(find "$source_dir" -maxdepth 3 -type f -name Anchor.toml -printf '%h\n' 2>/dev/null | head -n 1)"
+if [ -z "$root" ]; then
+    log "no Anchor.toml found under $source_dir"
+    write_error "no Anchor.toml found in bundle"
+    exit 65
+fi
+
+log "project root: $root"
+project="$WORK/project"
+cp -a "$root/." "$project/" || {
+    log "could not copy project into $WORK"
+    write_error "could not copy project into the sandbox work directory"
+    exit 70
+}
+
+# Trident 0.12+ runs `cargo run` from the current directory, and the fuzz
+# binaries live in the `trident-tests` workspace. Older layouts run from the
+# project root. Detect which one this bundle uses.
+run_dir="$project"
+workspace_kind="anchor-root"
+if [ -f "$project/trident-tests/Trident.toml" ]; then
+    run_dir="$project/trident-tests"
+    workspace_kind="trident-tests"
+fi
+
+# Building inside the fuzz image is optional: with --network none, Cargo can
+# only resolve crates that are already in the image's registry cache. Off by
+# default so a build is not mistaken for a fuzz failure. Bake an offline
+# registry into the image before turning this on.
+if [ "${FUZZFORGE_ANCHOR_BUILD:-0}" = "1" ]; then
+    log "running anchor build (offline)"
+    if ! (cd "$project" && anchor build >"$OUT/build.log" 2>&1); then
+        log "anchor build failed; see /out/build.log"
+        write_error "anchor build failed inside the sandbox; the image probably lacks an offline dependency cache"
+        exit 66
+    fi
+fi
+
+# Discover the fuzz test. 0.12+: trident-tests/<name>/test_fuzz.rs.
+# Older layout: trident-tests/fuzz_tests/<name>/.
+test_name="${TRIDENT_TEST:-}"
+if [ -z "$test_name" ] && [ "$workspace_kind" = "trident-tests" ]; then
+    test_name="$(find "$run_dir" -mindepth 2 -maxdepth 2 -type f -name test_fuzz.rs -printf '%h\n' 2>/dev/null \
+        | xargs -r -n 1 basename | sort | head -n 1)"
+fi
+if [ -z "$test_name" ] && [ -d "$project/trident-tests/fuzz_tests" ]; then
+    test_name="$(find "$project/trident-tests/fuzz_tests" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null \
+        | sort | head -n 1)"
+fi
+
+if [ -n "${TRIDENT_CMD:-}" ]; then
+    # Trusted operator configuration, not customer input. Word splitting is
+    # intentional so a full command line can be supplied.
+    read -r -a trident_argv <<<"$TRIDENT_CMD"
+elif [ "$workspace_kind" = "trident-tests" ] && [ -n "$test_name" ]; then
+    # --with-exit-code makes Trident exit 99 when it observes a failure.
+    # Trident 0.12 has no iteration-count flag: the count comes from the
+    # customer harness's `FuzzTest::fuzz(iterations, flows)` call, and the
+    # worker's wall-clock limit is the real campaign budget.
+    trident_argv=("$TRIDENT_BIN" fuzz run "$test_name" --with-exit-code)
+elif [ -n "$test_name" ]; then
+    trident_argv=("$TRIDENT_BIN" fuzz run "$test_name")
+else
+    trident_argv=("$TRIDENT_BIN" fuzz run)
+fi
+
+cd "$run_dir" || exit 70
+
+# Trident 0.12 prints per-failure assertion lines through an indicatif
+# progress bar, and indicatif suppresses them when stdout is not a TTY.
+# Running under `script` gives it a pty while still capturing the log.
+# FUZZING_* makes transaction-level panics land in a JSON file we can parse.
+cmdline="$(printf '%q ' "${trident_argv[@]}")"
+rm -rf "$run_dir/.fuzz-artifacts" "$OUT/metrics.json"
+log "running: ${trident_argv[*]} (in ${run_dir#"$WORK"/})"
+if command -v script >/dev/null 2>&1; then
+    FUZZING_METRICS=true FUZZING_JSON="$OUT/metrics.json" TRIDENT_WITH_EXIT_CODE=1 \
+        script -qec "$cmdline" /dev/null >"$OUT/fuzz.log" 2>&1
+else
+    log "warning: \`script\` is missing; Trident 0.12 assertion lines may be lost"
+    FUZZING_METRICS=true FUZZING_JSON="$OUT/metrics.json" TRIDENT_WITH_EXIT_CODE=1 \
+        "${trident_argv[@]}" >"$OUT/fuzz.log" 2>&1
+fi
+status=$?
+
+# Strip ANSI escapes and carriage returns left by the progress bar.
+clean_log="$OUT/fuzz.clean.log"
+sed -E 's/\x1B\[[0-9;?]*[a-zA-Z]//g' "$OUT/fuzz.log" 2>/dev/null | tr -d '\r' >"$clean_log" \
+    || cp "$OUT/fuzz.log" "$clean_log" 2>/dev/null || true
+
+# 0.12 banner: "Fuzzing with 8 threads - 10 iterations with 5 flow calls each".
+# Report iterations (cases), not total flow calls.
+executions="$(grep -aoE 'Fuzzing with [0-9]+ threads? - [0-9]+ iterations' "$clean_log" 2>/dev/null \
+    | tail -n 1 | grep -oE '[0-9]+ iterations' | grep -oE '^[0-9]+')"
+if [ -z "$executions" ]; then
+    executions="$(grep -aoE '(iterations|runs|executions)[^0-9]{0,4}[0-9]+' "$clean_log" 2>/dev/null \
+        | grep -oE '[0-9]+$' | tail -n 1)"
+fi
+if [ -z "$executions" ]; then
+    # Fall back to the progress bar denominator: "25/50 (50%)".
+    executions="$(grep -aoE '[0-9]+/[0-9]+ \([0-9]+%\)' "$clean_log" 2>/dev/null \
+        | tail -n 1 | grep -oE '/[0-9]+' | tr -d '/')"
+fi
+executions="${executions:-0}"
+
+version="$("$TRIDENT_BIN" --version 2>/dev/null | head -n 1 | tr -d '\r')"
+version="${version:-${TRIDENT_VERSION:-unknown}}"
+
+failures='[]'
+seen="$OUT/.seen-invariants"
+: >"$seen"
+
+add_failure() {
+    local invariant="$1" repro="$2" note="$3"
+    [ -n "$invariant" ] || return 0
+    if grep -Fqx -- "$invariant" "$seen" 2>/dev/null; then
+        return 0
+    fi
+    printf '%s\n' "$invariant" >>"$seen"
+    failures="$(jq -c \
+        --arg inv "$invariant" \
+        --arg repro "$repro" \
+        --arg note "$note" \
+        '. + [{
+            invariant: $inv,
+            reproducer: $repro,
+            note: $note,
+            minimized: false
+        }]' <<<"$failures")"
+}
+
+# Trident 0.12: "Assertion failed at <file>:<line>:<col>: <message> (seed: <hex>)"
+# The seed replays the exact iteration with `trident fuzz debug <test> <seed>`.
+# Progress-bar redraws land on the same line after \r removal, so isolate the
+# assertion substring instead of using the whole line.
+while IFS= read -r line; do
+    assertion="$(grep -oE 'Assertion failed at .*\(seed: [0-9a-f]{64}\)' <<<"$line" | tail -n 1)"
+    [ -n "$assertion" ] || continue
+    seed="$(grep -oE '[0-9a-f]{64}' <<<"$assertion" | tail -n 1)"
+    [ -n "$seed" ] || continue
+    invariant="$(sed -E 's/ \(seed: [0-9a-f]{64}\)$//' <<<"$assertion")"
+    repro="$(jq -cn --arg test "$test_name" --arg seed "$seed" '{test: $test, seed: $seed}')"
+    add_failure "$invariant" "$repro" \
+        "replay: cd trident-tests && trident fuzz debug ${test_name:-<test>} $seed"
+done < <(grep -aE 'Assertion failed at .*\(seed: [0-9a-f]{64}\)' "$clean_log" 2>/dev/null)
+
+# Transaction-level panics are recorded in Trident's metrics JSON.
+metrics_file="$OUT/metrics.json"
+if [ ! -f "$metrics_file" ]; then
+    metrics_file="$(find "$run_dir" -maxdepth 2 -type f -name 'fuzzing_metrics_*.json' 2>/dev/null | sort | tail -n 1)"
+fi
+if [ -n "${metrics_file:-}" ] && [ -f "$metrics_file" ]; then
+    while IFS=$'\t' read -r invariant seed inputs; do
+        [ -n "$seed" ] || continue
+        repro="$(jq -cn --arg test "$test_name" --arg seed "$seed" '{test: $test, seed: $seed}')"
+        add_failure "$invariant" "$repro" "transaction panic${inputs:+; inputs: $inputs}"
+    done < <(jq -r '
+        .transactions // {} | to_entries[] | .value.transactions_panics // {}
+        | to_entries[] | [.key, (.value.seed // ""), (.value.instruction_inputs // "")] | @tsv
+    ' "$metrics_file" 2>/dev/null)
+fi
+
+# Older Trident versions write failing inputs under crashes/ (or .repro files).
+# Keep this path so a version bump does not silently drop artifacts.
+artifact_count=0
+while IFS= read -r artifact; do
+    [ -n "$artifact" ] || continue
+    artifact_count=$((artifact_count + 1))
+    note="artifact: ${artifact#./}"
+    repro="$(head -c 65536 "$artifact" 2>/dev/null)"
+    add_failure "unexpected failure reported by the harness" "$repro" "$note"
+    [ "$artifact_count" -ge 100 ] && break
+done < <(find . -type f \( -path '*/crashes/*' -o -name '*.repro' -o -name 'crash-*' \) 2>/dev/null | sort | head -n 100)
+
+# A non-zero exit with no parsed case usually means the harness itself failed.
+# Keep the log tail so the customer sees why, rather than a silent empty run.
+if [ "$status" -ne 0 ] && [ "$failures" = '[]' ]; then
+    tail_text="$(tail -c 4000 "$clean_log" 2>/dev/null)"
+    repro="$(jq -cn --arg tail "$tail_text" '{log: $tail}')"
+    failures="$(jq -c \
+        --arg inv "harness exited non-zero without a case artifact" \
+        --arg repro "$repro" \
+        '. + [{
+            invariant: $inv,
+            reproducer: $repro,
+            note: "see the sandbox log tail",
+            minimized: false
+        }]' <<<"$failures")"
+fi
+
+tail_text="$(tail -c 4000 "$clean_log" 2>/dev/null)"
+jq -n \
+    --argjson executions "$executions" \
+    --arg version "$version" \
+    --argjson failures "$failures" \
+    --arg tail "$tail_text" \
+    '{
+        executions: $executions,
+        trident_version: $version,
+        failures: $failures,
+        log_tail: $tail
+    }' >"$OUT/result.json"
+
+log "finished with status $status; wrote $OUT/result.json"
+exit "$status"

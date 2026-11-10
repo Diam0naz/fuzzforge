@@ -1,0 +1,7 @@
+target/
+frontend/node_modules/
+frontend/.next/
+data/
+.git/
+.env
+examples/sample-bundle.tar.gz

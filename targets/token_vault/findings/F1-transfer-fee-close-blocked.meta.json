@@ -1,0 +1,23 @@
+{
+  "test_name": "token2022_matrix",
+  "timestamp": "2026-11-10T21:09:21Z",
+  "iteration": 0,
+  "actions": [
+    {
+      "name": "deposit",
+      "params": {
+        "amount": 3672454,
+        "m": 2
+      },
+      "success": true
+    },
+    {
+      "name": "owner_exit",
+      "params": {
+        "m": 2
+      },
+      "success": false,
+      "error_code": 35
+    }
+  ]
+}

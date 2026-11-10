@@ -1,0 +1,32 @@
+[package]
+name = "raydium_cp_swap_fuzz"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+
+[workspace]
+# Standalone workspace, isolated from the fuzzforge service crates.
+
+[dependencies]
+crucible-fuzzer = { git = "https://github.com/asymmetric-research/crucible", rev = "26c23914548035d51b86e885e86f5e3ebafb88ee" }
+crucible-test-context = { git = "https://github.com/asymmetric-research/crucible", rev = "26c23914548035d51b86e885e86f5e3ebafb88ee" }
+fuzzforge-scenarios = { path = "../../scenarios" }
+
+anchor-lang = "1.0.1"
+solana-account = "4"
+solana-keypair = "3.0"
+solana-pubkey = "3.0"
+solana-signer = "3.0"
+
+libafl = { version = "0.15.1", features = ["std", "cli", "prelude"] }
+libafl_bolts = { version = "0.15.1", features = ["std"] }
+arbitrary = { version = "1", features = ["derive"] }
+ctor = "0.6"
+ctrlc = "3.4"
+
+[[bin]]
+name = "invariant_test"
+path = "src/main.rs"
+
+[features]
+amm_invariants = []

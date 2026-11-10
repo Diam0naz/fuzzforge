@@ -1,0 +1,23 @@
+{
+  "test_name": "token2022_matrix",
+  "timestamp": "2026-11-10T21:09:20Z",
+  "iteration": 0,
+  "actions": [
+    {
+      "name": "deposit",
+      "params": {
+        "amount": 1,
+        "m": 3
+      },
+      "success": true
+    },
+    {
+      "name": "attacker_pull",
+      "params": {
+        "m": 3,
+        "pct": 40
+      },
+      "success": true
+    }
+  ]
+}

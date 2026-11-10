@@ -1,0 +1,87 @@
+# Local development stack.
+#
+# The worker mounts /var/run/docker.sock so it can start sandbox containers.
+# That makes the worker container root-equivalent on the host. Run this stack
+# on a dedicated machine, never on a laptop or a shared CI runner. Production
+# should run the worker directly on a dedicated host, not as a sibling
+# container with the socket mounted.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fuzzforge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fuzzforge}
+      POSTGRES_DB: ${POSTGRES_DB:-fuzzforge}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-fuzzforge} -d ${POSTGRES_DB:-fuzzforge}",
+        ]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-fuzzforge}:${POSTGRES_PASSWORD:-fuzzforge}@postgres:5432/${POSTGRES_DB:-fuzzforge}
+      BIND_ADDR: 0.0.0.0:8080
+      STORAGE_DIR: /data
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-104857600}
+      MAX_UNPACKED_BYTES: ${MAX_UNPACKED_BYTES:-2147483648}
+    volumes:
+      - ./data:/data
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-fuzzforge}:${POSTGRES_PASSWORD:-fuzzforge}@postgres:5432/${POSTGRES_DB:-fuzzforge}
+      STORAGE_DIR: /data
+      # Docker resolves -v paths on the host, not inside this container.
+      HOST_STORAGE_DIR: ${PWD}/data
+      # Local dev uses a locally built tag. This is refused by default; the
+      # override exists only so the prototype is runnable.
+      SANDBOX_IMAGE: ${SANDBOX_IMAGE:-fuzzforge/sandbox:latest}
+      ALLOW_UNPINNED_IMAGE: ${ALLOW_UNPINNED_IMAGE:-1}
+      JOB_TIMEOUT_SECS: ${JOB_TIMEOUT_SECS:-1800}
+      MINIMIZE: ${MINIMIZE:-1}
+      SANDBOX_MEMORY: ${SANDBOX_MEMORY:-4g}
+      SANDBOX_CPUS: ${SANDBOX_CPUS:-2}
+      SANDBOX_PIDS: ${SANDBOX_PIDS:-256}
+      SANDBOX_WORK_SIZE: ${SANDBOX_WORK_SIZE:-8g}
+      RUST_LOG: ${RUST_LOG:-fuzzforge_worker=info,info}
+    volumes:
+      - ./data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
