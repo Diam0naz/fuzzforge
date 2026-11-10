@@ -45,6 +45,9 @@ const START_TS: i64 = 1_700_000_000;
 const TRADE_FEE_RATE: u64 = 2_500;
 const PROTOCOL_FEE_RATE: u64 = 120_000;
 const FUND_FEE_RATE: u64 = 40_000;
+// Creator fee 0.1% of volume on v2 pools; the protocol keeps 20% of it.
+const CREATOR_FEE_RATE: u64 = 1_000;
+const CREATOR_FEE_SHARE_RATE: u64 = 200_000;
 
 // PoolState is #[repr(C, packed)]; offsets include the 8-byte discriminator.
 const OFF_TOKEN_0_VAULT: usize = 8 + 32 * 2;
@@ -57,15 +60,25 @@ const OFF_CREATOR_FEES_0: usize = 397;
 const OFF_CREATOR_FEES_1: usize = 405;
 
 use MintProfile::*;
-/// (side A profile, side B profile, initial A, initial B). Sides are sorted
-/// into token_0/token_1 by mint address at setup.
-const POOLS: [(MintProfile, MintProfile, u64, u64); 6] = [
-    (SplToken, SplToken, 1_000_000_000, 1_000_000_000),
-    (SplToken, TransferFee, 1_000_000_000, 3_000_000_000),
-    (TransferFee, TransferFeeCapped, 1_000_000, 1_000_000),
-    (Plain2022, InterestBearing, 1_000_000_000, 1_000_000_000),
-    (TransferFeeMax, SplToken, 1_000_000_000, 1_000_000_000),
-    (TransferFee, SplToken, 10_000, 20_000),
+// CreatorFeeOn as encoded by initialize_v2.
+const CREATOR_BOTH: Option<u8> = Some(0);
+const CREATOR_TOKEN0: Option<u8> = Some(1);
+const CREATOR_TOKEN1: Option<u8> = Some(2);
+
+/// (side A profile, side B profile, initial A, initial B, creator fee mode).
+/// Sides are sorted into token_0/token_1 by mint address at setup. `None`
+/// creates the pool with `initialize`; `Some(mode)` uses `initialize_v2` with
+/// the creator fee on.
+const POOLS: [(MintProfile, MintProfile, u64, u64, Option<u8>); 9] = [
+    (SplToken, SplToken, 1_000_000_000, 1_000_000_000, None),
+    (SplToken, TransferFee, 1_000_000_000, 3_000_000_000, None),
+    (TransferFee, TransferFeeCapped, 1_000_000, 1_000_000, None),
+    (Plain2022, InterestBearing, 1_000_000_000, 1_000_000_000, None),
+    (TransferFeeMax, SplToken, 1_000_000_000, 1_000_000_000, None),
+    (TransferFee, SplToken, 10_000, 20_000, None),
+    (SplToken, TransferFee, 1_000_000_000, 1_000_000_000, CREATOR_BOTH),
+    (TransferFeeCapped, SplToken, 1_000_000, 2_000_000, CREATOR_TOKEN0),
+    (TransferFee, TransferFeeMax, 50_000_000, 50_000_000, CREATOR_TOKEN1),
 ];
 const NP: usize = POOLS.len();
 const NU: usize = 2;
@@ -85,6 +98,7 @@ struct Pool {
     user_t1: [Pubkey; NU],
     user_lp: [Pubkey; NU],
     live: bool,
+    creator_fee: bool,
     share: ShareValueLedger,
 }
 
@@ -103,6 +117,10 @@ struct AmmFixture {
     users: [Rc<Keypair>; NU],
     amm_config: Pubkey,
     pools: Vec<Pool>,
+    mint_authority: Rc<Keypair>,
+    issuer: Rc<Keypair>,
+    /// Violations recorded inside actions (exact-accounting checks).
+    accounting: Vec<String>,
 }
 
 fn pda(seeds: &[&[u8]]) -> Pubkey {
@@ -137,12 +155,20 @@ fn write_amm_config(ctx: &mut TestContext, address: Pubkey) {
     }
     d.extend_from_slice(Pubkey::new_unique().as_ref()); // protocol_owner
     d.extend_from_slice(Pubkey::new_unique().as_ref()); // fund_owner
-    d.extend_from_slice(&0u64.to_le_bytes()); // creator_fee_rate
-    d.extend_from_slice(&0u64.to_le_bytes()); // creator_fee_share_rate
+    d.extend_from_slice(&CREATOR_FEE_RATE.to_le_bytes());
+    d.extend_from_slice(&CREATOR_FEE_SHARE_RATE.to_le_bytes());
     d.extend_from_slice(&[0u8; 8 * 14]); // padding
     assert_eq!(d.len(), 236, "AmmConfig::LEN");
     ctx.write_account(&address, Account { lamports: 10 * SOL, data: d, owner: PROGRAM_ID, executable: false, rent_epoch: 0 })
         .unwrap();
+}
+
+fn advance_epoch(ctx: &mut TestContext) {
+    let mut clock: Clock = ctx.svm.get_sysvar::<Clock>();
+    clock.epoch += 1;
+    clock.slot += 432_000;
+    clock.unix_timestamp += 2 * 86_400;
+    ctx.set_sysvar(&clock);
 }
 
 fn set_time(ctx: &mut TestContext, ts: i64) {
@@ -168,7 +194,7 @@ impl AmmFixture {
         })
     }
 
-    fn initialize_ix(&self, creator: &Keypair, m0: &MintHandle, m1: &MintHandle, a0: u64, a1: u64) -> (solana_instruction_shim::Instruction, Pool) {
+    fn initialize_ix(&self, creator: &Keypair, m0: &MintHandle, m1: &MintHandle, a0: u64, a1: u64, creator_fee_on: Option<u8>) -> (solana_instruction_shim::Instruction, Pool) {
         let state = pda(&[b"pool", self.amm_config.as_ref(), m0.mint.as_ref(), m1.mint.as_ref()]);
         let authority = pda(&[b"vault_and_lp_mint_auth_seed"]);
         let lp_mint = pda(&[b"pool_lp_mint", state.as_ref()]);
@@ -177,10 +203,11 @@ impl AmmFixture {
         let observation = pda(&[b"observation", state.as_ref()]);
         let lp_handle = MintHandle { profile: SplToken, mint: lp_mint, token_program: SPL_TOKEN_ID, decimals: 9 };
         let creator_lp = lp_handle.ata(&creator.pubkey());
-        let ix = AnchorIx::new(PROGRAM_ID, "initialize")
-            .u64(a0)
-            .u64(a1)
-            .u64(0)
+        let b = match creator_fee_on {
+            None => AnchorIx::new(PROGRAM_ID, "initialize").u64(a0).u64(a1).u64(0),
+            Some(mode) => AnchorIx::new(PROGRAM_ID, "initialize_v2").u64(a0).u64(a1).u64(0).option_tag(true).u8(mode),
+        };
+        let b = b
             .signer_mut(creator.pubkey())
             .readonly(self.amm_config)
             .readonly(authority)
@@ -199,9 +226,9 @@ impl AmmFixture {
             .readonly(m0.token_program)
             .readonly(m1.token_program)
             .readonly(ATA_PROGRAM)
-            .readonly(SYSTEM_PROGRAM)
-            .readonly(SYSVAR_RENT)
-            .build();
+            .readonly(SYSTEM_PROGRAM);
+        // initialize_v2 drops the unused rent sysvar.
+        let ix = if creator_fee_on.is_none() { b.readonly(SYSVAR_RENT).build() } else { b.build() };
         let pool = Pool {
             label: String::new(),
             m0: m0.clone(),
@@ -216,6 +243,7 @@ impl AmmFixture {
             user_t1: Default::default(),
             user_lp: Default::default(),
             live: false,
+            creator_fee: creator_fee_on.is_some(),
             share: Default::default(),
         };
         (ix, pool)
@@ -308,7 +336,17 @@ impl AmmFixture {
 
         let amm_config = det_keypair("amm-config").pubkey();
         write_amm_config(&mut ctx, amm_config);
-        let mut f = Self { ctx, users, amm_config, pools: Vec::new() };
+        let mint_authority = Rc::new(mint_authority);
+        let issuer = Rc::new(issuer);
+        let mut f = Self {
+            ctx,
+            users,
+            amm_config,
+            pools: Vec::new(),
+            mint_authority: mint_authority.clone(),
+            issuer: issuer.clone(),
+            accounting: Vec::new(),
+        };
 
         let env = TokenEnv { payer: &f.users[0], mint_authority: &mint_authority, attacker: &issuer };
 
@@ -335,7 +373,7 @@ impl AmmFixture {
             let creator = probe.users[0].clone();
             env.fund(&mut probe.ctx, &m0, &creator.pubkey(), USER_TOKENS).unwrap();
             env.fund(&mut probe.ctx, &m1, &creator.pubkey(), USER_TOKENS).unwrap();
-            let (ix, _) = probe.initialize_ix(&creator, &m0, &m1, 1_000_000_000, 1_000_000_000);
+            let (ix, _) = probe.initialize_ix(&creator, &m0, &m1, 1_000_000_000, 1_000_000_000, None);
             let r = send(&mut probe.ctx, ix, &creator);
             let verdict = match (r.is_ok(), expect_ok) {
                 (true, true) => "accepted (supported, as documented)".to_string(),
@@ -347,7 +385,7 @@ impl AmmFixture {
         }
 
         // ---- Pools under test ------------------------------------------------
-        for (p, (pa, pb, ia, ib)) in POOLS.into_iter().enumerate() {
+        for (p, (pa, pb, ia, ib, creator_fee_on)) in POOLS.into_iter().enumerate() {
             let env = TokenEnv { payer: &f.users[0].clone(), mint_authority: &mint_authority, attacker: &issuer };
             let a = env.create_mint(&mut f.ctx, pa, &det_keypair(&format!("pool-{p}-a")), DECIMALS).unwrap();
             let b = env.create_mint(&mut f.ctx, pb, &det_keypair(&format!("pool-{p}-b")), DECIMALS).unwrap();
@@ -360,8 +398,12 @@ impl AmmFixture {
                 user_t1[u] = env.fund(&mut f.ctx, &m1, &owner, USER_TOKENS).unwrap();
             }
             let creator = f.users[0].clone();
-            let (ix, mut pool) = f.initialize_ix(&creator, &m0, &m1, i0, i1);
-            pool.label = format!("pool{p}[{} / {}]", m0.profile.name(), m1.profile.name());
+            let (ix, mut pool) = f.initialize_ix(&creator, &m0, &m1, i0, i1, creator_fee_on);
+            let mode = match creator_fee_on {
+                None => String::new(),
+                Some(m) => format!(", creator fee on {}", ["both", "token0", "token1"][m as usize]),
+            };
+            pool.label = format!("pool{p}[{} / {}{mode}]", m0.profile.name(), m1.profile.name());
             pool.user_t0 = user_t0;
             pool.user_t1 = user_t1;
             match send(&mut f.ctx, ix, &creator) {
@@ -391,7 +433,7 @@ impl AmmFixture {
         f
     }
 
-    pub fn action_deposit(&mut self, #[range(0..6)] p: usize, #[range(0..2)] u: usize, #[range(1..2_000_000)] ppm: u64, dust: bool) -> bool {
+    pub fn action_deposit(&mut self, #[range(0..9)] p: usize, #[range(0..2)] u: usize, #[range(1..2_000_000)] ppm: u64, dust: bool) -> bool {
         let p = p % NP;
         if !self.pools[p].live {
             return false;
@@ -401,7 +443,7 @@ impl AmmFixture {
         self.deposit_or_withdraw(p, u % NU, lp, true).is_ok()
     }
 
-    pub fn action_withdraw(&mut self, #[range(0..6)] p: usize, #[range(0..2)] u: usize, #[range(1..1_000_001)] ppm: u64, dust: bool) -> bool {
+    pub fn action_withdraw(&mut self, #[range(0..9)] p: usize, #[range(0..2)] u: usize, #[range(1..1_000_001)] ppm: u64, dust: bool) -> bool {
         let p = p % NP;
         let u = u % NU;
         if !self.pools[p].live {
@@ -415,7 +457,7 @@ impl AmmFixture {
         self.deposit_or_withdraw(p, u, lp, false).is_ok()
     }
 
-    pub fn action_swap_base_input(&mut self, #[range(0..6)] p: usize, #[range(0..2)] u: usize, zero_for_one: bool, #[range(1..2_000_000)] ppm: u64, dust: bool) -> bool {
+    pub fn action_swap_base_input(&mut self, #[range(0..9)] p: usize, #[range(0..2)] u: usize, zero_for_one: bool, #[range(1..2_000_000)] ppm: u64, dust: bool) -> bool {
         let p = p % NP;
         let Some(v) = self.pools[p].live.then(|| self.view(p)).flatten() else { return false };
         let reserve_in = if zero_for_one { v.vault0 } else { v.vault1 };
@@ -423,7 +465,7 @@ impl AmmFixture {
         self.swap(p, u % NU, zero_for_one, true, amount).is_ok()
     }
 
-    pub fn action_swap_base_output(&mut self, #[range(0..6)] p: usize, #[range(0..2)] u: usize, zero_for_one: bool, #[range(1..1_000_000)] ppm: u64, dust: bool) -> bool {
+    pub fn action_swap_base_output(&mut self, #[range(0..9)] p: usize, #[range(0..2)] u: usize, zero_for_one: bool, #[range(1..1_000_000)] ppm: u64, dust: bool) -> bool {
         let p = p % NP;
         let Some(v) = self.pools[p].live.then(|| self.view(p)).flatten() else { return false };
         let reserve_out = if zero_for_one { v.vault1 } else { v.vault0 };
@@ -437,11 +479,81 @@ impl AmmFixture {
         true
     }
 
+    /// Pool creator collects the creator fee. The protocol's share is rebooked
+    /// as protocol fees and the rest leaves the vault, so LP reserves
+    /// (vault minus booked fees) must not change by a single unit.
+    pub fn action_collect_creator_fee(&mut self, #[range(0..9)] p: usize) -> bool {
+        let p = p % NP;
+        if !self.pools[p].live || !self.pools[p].creator_fee {
+            return false;
+        }
+        let Some(before) = self.view(p) else { return false };
+        let pool = &self.pools[p];
+        let creator = self.users[0].clone();
+        let fee_share = pda(&[b"creator_fee_share", creator.pubkey().as_ref(), self.amm_config.as_ref()]);
+        let ix = AnchorIx::new(PROGRAM_ID, "collect_creator_fee")
+            .signer_mut(creator.pubkey())
+            .readonly(pool.authority)
+            .mutable(pool.state)
+            .readonly(self.amm_config)
+            .mutable(pool.vault0)
+            .mutable(pool.vault1)
+            .readonly(pool.m0.mint)
+            .readonly(pool.m1.mint)
+            .mutable(pool.user_t0[0])
+            .mutable(pool.user_t1[0])
+            .readonly(pool.m0.token_program)
+            .readonly(pool.m1.token_program)
+            .readonly(ATA_PROGRAM)
+            .readonly(SYSTEM_PROGRAM)
+            .readonly(fee_share)
+            .build();
+        if send(&mut self.ctx, ix, &creator).is_err() {
+            return false;
+        }
+        if std::env::var("FF_DEBUG_LOGS").is_ok() {
+            eprintln!("[FF_DEBUG_OK] collect_creator_fee");
+        }
+        if let Some(after) = self.view(p) {
+            let r = |v: &PoolView| (v.vault0 - v.fees0.min(v.vault0), v.vault1 - v.fees1.min(v.vault1));
+            if r(&before) != r(&after) {
+                let label = self.pools[p].label.clone();
+                self.accounting.push(format!(
+                    "[fee-accounting] {label}: collect_creator_fee moved LP reserves {:?} -> {:?}",
+                    r(&before),
+                    r(&after)
+                ));
+            }
+        }
+        true
+    }
+
+    /// Mint issuer schedules a new transfer fee on one side of a pool. It takes
+    /// effect two epochs later (see action_advance_epoch).
+    pub fn action_issuer_set_fee(&mut self, #[range(0..9)] p: usize, side_one: bool, #[range(0..10_001)] bps: u64, #[range(0..1_000_000)] max_fee: u64) -> bool {
+        let p = p % NP;
+        let m = if side_one { self.pools[p].m1.clone() } else { self.pools[p].m0.clone() };
+        if m.profile.transfer_fee_params().is_none() {
+            return false;
+        }
+        let env = TokenEnv { payer: &self.issuer, mint_authority: &self.mint_authority, attacker: &self.issuer };
+        let ok = env.issuer_set_transfer_fee(&mut self.ctx, &m, bps.min(10_000) as u16, max_fee);
+        if ok && std::env::var("FF_DEBUG_LOGS").is_ok() {
+            eprintln!("[FF_DEBUG_OK] issuer_set_fee");
+        }
+        ok
+    }
+
+    pub fn action_advance_epoch(&mut self) -> bool {
+        advance_epoch(&mut self.ctx);
+        true
+    }
+
     /// Harness self-test, off unless FF_CANARY=1: skim one base unit from a
     /// vault outside the program (the smallest possible value leak). With the
     /// canary on, the share-value invariant must fire; if it does not, the
     /// harness is blind and a clean run means nothing.
-    pub fn action_canary_skim(&mut self, #[range(0..6)] p: usize) -> bool {
+    pub fn action_canary_skim(&mut self, #[range(0..9)] p: usize) -> bool {
         if std::env::var("FF_CANARY").is_err() || !self.pools[p % NP].live {
             return false;
         }
@@ -473,5 +585,8 @@ fn amm_invariants(fixture: &mut AmmFixture) {
         if let Some(msg) = fixture.pools[p].share.observe(&label, r0, r1, v.lp_supply) {
             fuzz_assert!(false, "{}", msg);
         }
+    }
+    if let Some(msg) = fixture.accounting.first() {
+        fuzz_assert!(false, "{}", msg);
     }
 }

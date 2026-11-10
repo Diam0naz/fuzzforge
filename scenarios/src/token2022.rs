@@ -17,7 +17,7 @@ use spl_associated_token_account_interface::{
 };
 use spl_token_2022_interface::{
     extension::{
-        transfer_fee::{instruction::initialize_transfer_fee_config, TransferFeeAmount},
+        transfer_fee::{self, instruction::initialize_transfer_fee_config, TransferFeeAmount},
         interest_bearing_mint, transfer_hook, BaseStateWithExtensions, ExtensionType, StateWithExtensions,
     },
     instruction as tix,
@@ -291,6 +291,25 @@ impl TokenEnv<'_> {
             Err(_) => return false,
         };
         send(ctx, ix, &[self.attacker]).is_ok()
+    }
+
+    /// Issuer action: schedule a new transfer fee. Token-2022 activates it two
+    /// epochs after the current one, so a program that caches or precomputes
+    /// fees across an epoch boundary can disagree with what the token program
+    /// actually charges. Succeeds only for fee-bearing profiles (the attacker is
+    /// the fee config authority).
+    pub fn issuer_set_transfer_fee(&self, ctx: &mut TestContext, m: &MintHandle, bps: u16, max_fee: u64) -> bool {
+        match transfer_fee::instruction::set_transfer_fee(
+            &m.token_program,
+            &m.mint,
+            &self.attacker.pubkey(),
+            &[],
+            bps,
+            max_fee,
+        ) {
+            Ok(ix) => send(ctx, ix, &[self.attacker]).is_ok(),
+            Err(_) => false,
+        }
     }
 
     /// Attacker attempt: freeze `victim`. Succeeds only when the attacker is the
