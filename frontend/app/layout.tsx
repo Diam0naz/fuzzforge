@@ -3,6 +3,7 @@ import { Archivo, IBM_Plex_Mono } from "next/font/google";
 import Link from "next/link";
 
 import { CONTACT_EMAIL } from "@/lib/api";
+import { Mark } from "./mark";
 import "./globals.css";
 
 const archivo = Archivo({
@@ -45,6 +46,7 @@ export default function RootLayout({
         <header className="site-header">
           <div className="wrap site-header-inner">
             <Link href="/" className="wordmark">
+              <Mark size={28} />
               Fuzzforge
             </Link>
             <nav className="site-nav" aria-label="Main">
@@ -60,7 +62,10 @@ export default function RootLayout({
         <div id="main">{children}</div>
         <footer className="site-footer">
           <div className="wrap site-footer-inner">
-            <p className="wordmark wordmark-small">Fuzzforge</p>
+            <p className="wordmark wordmark-small">
+              <Mark size={20} />
+              Fuzzforge
+            </p>
             <p>Pre-audit fuzzing for Solana programs. Not a substitute for a manual audit.</p>
             <p>
               <a href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a>

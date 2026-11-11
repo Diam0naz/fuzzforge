@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 268 48" width="268" height="48" role="img" aria-label="Fuzzforge">
+  <title>Fuzzforge</title>
+  <rect x="6" y="1" width="36" height="6" fill="#a8822f"/>
+  <rect x="6" y="9" width="10" height="6" fill="#8f6226"/>
+  <rect x="10" y="17" width="28" height="6" fill="#a3362e"/>
+  <rect x="6" y="25" width="10" height="6" fill="#5b4f9b"/>
+  <rect x="6" y="33" width="10" height="6" fill="#3d57a8"/>
+  <rect x="6" y="41" width="10" height="6" fill="#2a4a9e"/>
+  <text x="58" y="37" fill="#17202c" font-family="Archivo, 'Helvetica Neue', Arial, sans-serif" font-size="33" font-weight="760" font-stretch="125%" letter-spacing="-0.6">Fuzzforge</text>
+</svg>

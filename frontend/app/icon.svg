@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16" role="img" aria-label="Fuzzforge">
+  <title>Fuzzforge</title>
+  <style>.t0{fill:#a8822f}.t1{fill:#8f6226}.t2{fill:#5b4f9b}.t3{fill:#3d57a8}.t4{fill:#2a4a9e}.hit{fill:#a3362e}@media (prefers-color-scheme:dark){.t0{fill:#e4c57c}.t1{fill:#cf9a55}.t2{fill:#8f84d6}.t3{fill:#6f8fe2}.t4{fill:#9db6ea}.hit{fill:#e2675b}}</style>
+  <rect class="t0" x="2" y="1" width="12" height="3"/>
+  <rect class="t1" x="2" y="5" width="4" height="3"/>
+  <rect class="hit" x="4" y="9" width="8" height="3"/>
+  <rect class="t4" x="2" y="13" width="4" height="3"/>
+</svg>

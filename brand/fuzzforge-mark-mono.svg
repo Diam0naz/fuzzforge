@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" role="img" aria-label="Fuzzforge">
+  <title>Fuzzforge</title>
+  <rect x="6" y="1" width="36" height="6" fill="currentColor"/>
+  <rect x="6" y="9" width="10" height="6" fill="currentColor"/>
+  <rect x="10" y="17" width="28" height="6" fill="currentColor"/>
+  <rect x="6" y="25" width="10" height="6" fill="currentColor"/>
+  <rect x="6" y="33" width="10" height="6" fill="currentColor"/>
+  <rect x="6" y="41" width="10" height="6" fill="currentColor"/>
+</svg>
