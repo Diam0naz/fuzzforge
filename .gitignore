@@ -17,6 +17,8 @@ cu-profile/
 cu-profile-*/
 # Reference builds for upgrade-diff runs (dumped or built locally; see SOURCE.md)
 targets/*/program/reference/
+# Mainnet dumps used as fuzz targets (re-dump with the command in SOURCE.md)
+targets/orca_whirlpools/program/*.so
 
 # Local agent/editor tooling
 .claude/

@@ -54,6 +54,21 @@ impl AnchorIx {
         self
     }
 
+    pub fn u16(mut self, v: u16) -> Self {
+        self.data.extend_from_slice(&v.to_le_bytes());
+        self
+    }
+
+    pub fn i32(mut self, v: i32) -> Self {
+        self.data.extend_from_slice(&v.to_le_bytes());
+        self
+    }
+
+    pub fn u128(mut self, v: u128) -> Self {
+        self.data.extend_from_slice(&v.to_le_bytes());
+        self
+    }
+
     pub fn u8(mut self, v: u8) -> Self {
         self.data.push(v);
         self
@@ -93,7 +108,15 @@ impl AnchorIx {
     }
 }
 
-/// Little-endian field readers for packed zero-copy accounts.
+/// Little-endian field readers for packed zero-copy and Borsh accounts.
+pub fn read_u128(data: &[u8], offset: usize) -> u128 {
+    u128::from_le_bytes(data[offset..offset + 16].try_into().unwrap())
+}
+
+pub fn read_i32(data: &[u8], offset: usize) -> i32 {
+    i32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
+}
+
 pub fn read_u64(data: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap())
 }
