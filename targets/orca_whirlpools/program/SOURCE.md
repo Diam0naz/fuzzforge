@@ -60,3 +60,41 @@ instruction's outcome or on resulting account bytes. Each one is either an
 intended change in that commit or a bug in the port. If it is a bug, it
 goes to Orca's bug bounty on Immunefi (https://immunefi.com/bug-bounty/orca,
 per the repository's SECURITY.md) and stays private.
+
+## Results
+
+**2026-11-11, mainnet build** (dump `c422b22f…`): 4 cores for 15 minutes,
+60,568 executions and 1.8M actions (98.9% succeeding). There were 0
+violations, and edge coverage was 18.2%. The mint-policy preflight matched
+the documentation in 16 of 16 cases. The vault-skim canary
+(`FF_CANARY=1`) is caught after about 90 executions.
+
+**2026-11-11, port vs pre-port** (`822f213` sha256 `1c328e3ce324…`
+against `71569ae` sha256 `39ef3a1d78a8…`): 4 cores for 15 minutes,
+46,428 executions and 1.74M actions (93.5% succeeding; the two
+post-port instructions fail on both builds alike).
+
+- **Differences:** none, in instruction outcome or in the bytes of pools,
+  vaults, tick arrays, positions or user accounts.
+- **Violations:** none.
+- **Setup:** all 8 pools were identical on both builds.
+- **Canary:** the diff canary (`FF_CANARY=diff`) is caught after 2
+  executions.
+
+Compute, worst case per instruction (port / Anchor):
+
+| Instruction | Port | Anchor | Saved |
+|---|---|---|---|
+| `decrease_liquidity` | 10,398 | 21,506 | 52% |
+| `increase_liquidity` | 11,463 | 23,089 | 50% |
+| `decrease_liquidity_v2` | 22,804 | 38,730 | 41% |
+| `increase_liquidity_v2` | 38,610 | 39,572 | 2% |
+
+All other instructions are within ±260 units.
+
+**Not yet covered:**
+- stateful (long-sequence) runs;
+- transfer-hook pools (they need a hook program);
+- positions near the min and max tick;
+- rewards;
+- adaptive-fee pools.
