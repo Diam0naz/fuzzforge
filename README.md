@@ -55,7 +55,9 @@ fuzzforge/
 │   └── app/jobs/[id]/page.tsx
 ├── examples/scripts/make-sample-bundle.sh
 ├── scenarios/                  # hostile-scenario library for Crucible harnesses
-│                               #   (Token-2022 mint matrix, invariant ledgers)
+│                               #   (Token-2022 mint matrix, invariant ledgers,
+│                               #   upgrade-diff, compute profile)
+├── tools/cu-profile.sh         # merge a campaign's compute-unit profile
 └── targets/<program>/          # one standalone Crucible harness per engagement,
                                 #   with findings/ (minimized cases) and REPORT.md
 ```

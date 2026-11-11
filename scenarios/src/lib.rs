@@ -10,8 +10,14 @@
 //!   for any Token-2022 account with extensions).
 //! * [`invariants`]: reusable ledgers for custody and liveness invariants that
 //!   harnesses feed from their actions and assert in `#[invariant_test]`.
+//! * [`diff`]: upgrade-diff fuzzing, where the previous build of the program is
+//!   the oracle and no hand-written invariant is needed.
+//! * [`compute`]: compute-unit high-water marks per instruction and a budget
+//!   cliff check.
 
 pub mod anchor;
+pub mod compute;
+pub mod diff;
 pub mod invariants;
 pub mod token2022;
 

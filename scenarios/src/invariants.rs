@@ -138,6 +138,31 @@ impl ShareValueLedger {
     }
 }
 
+/// Deposit fairness: what a depositor could withdraw immediately afterwards is
+/// worth what the vault took from them, up to `tolerance` base units of
+/// rounding.
+///
+/// This is the victim's side of the donation (share inflation) attack. Share
+/// value never falls in that attack, so [`ShareValueLedger`] stays quiet; the
+/// loss is the depositor's, whose shares round down while the attacker's
+/// earlier shares absorb the difference.
+///
+/// `inflow` is what the vault received on one side, `shares` what the
+/// depositor was minted, `reserve_after` and `supply_after` the LP-owned
+/// reserve on that side and the share supply once the deposit landed.
+pub fn deposit_fairness(label: &str, side: &str, inflow: u64, shares: u64, reserve_after: u64, supply_after: u64, tolerance: u64) -> Option<String> {
+    if supply_after == 0 {
+        return None;
+    }
+    let claim = (shares as u128 * reserve_after as u128 / supply_after as u128) as u64;
+    (claim.saturating_add(tolerance) < inflow).then(|| {
+        format!(
+            "[deposit-fairness] {label}: deposit put {inflow} of {side} into the vault for {shares} shares that redeem for only {claim} (lost {})",
+            inflow - claim
+        )
+    })
+}
+
 /// Pull the most informative line out of a failed transaction's logs.
 pub fn summarize_logs(logs: &[String]) -> String {
     logs.iter()

@@ -13,6 +13,10 @@ crashes/
 crashes-*/
 .fuzz-cache/
 corpus/
+cu-profile/
+cu-profile-*/
+# Reference builds for upgrade-diff runs (dumped or built locally; see SOURCE.md)
+targets/*/program/reference/
 
 # Local agent/editor tooling
 .claude/

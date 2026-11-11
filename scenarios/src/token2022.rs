@@ -293,6 +293,28 @@ impl TokenEnv<'_> {
         send(ctx, ix, &[self.attacker]).is_ok()
     }
 
+    /// Donation: `donor` transfers tokens straight into `target`, an account
+    /// the program under test owns, without calling the program. Anyone can do
+    /// this to any token account. A program that prices shares from the raw
+    /// balance (or assumes the balance only moves through its own
+    /// instructions) can be skewed by it: the classic case is inflating the
+    /// share price so the next depositor's shares round down to nothing.
+    pub fn donate(&self, ctx: &mut TestContext, m: &MintHandle, donor: &Keypair, target: &Pubkey, amount: u64) -> bool {
+        match tix::transfer_checked(
+            &m.token_program,
+            &m.ata(&donor.pubkey()),
+            &m.mint,
+            target,
+            &donor.pubkey(),
+            &[],
+            amount,
+            m.decimals,
+        ) {
+            Ok(ix) => send(ctx, ix, &[donor]).is_ok(),
+            Err(_) => false,
+        }
+    }
+
     /// Issuer action: schedule a new transfer fee. Token-2022 activates it two
     /// epochs after the current one, so a program that caches or precomputes
     /// fees across an epoch boundary can disagree with what the token program

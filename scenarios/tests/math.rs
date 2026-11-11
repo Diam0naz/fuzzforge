@@ -27,3 +27,41 @@ fn share_value_handles_256_bit_products() {
     assert!(l.observe("p", big, big - 1, big).is_some());
     assert!(l.observe("p", big, big, big).is_none());
 }
+
+#[test]
+fn deposit_fairness_flags_inflated_share_price() {
+    use fuzzforge_scenarios::invariants::deposit_fairness;
+    // Fair: 1,000 in for 1,000 of 2,000 shares over a 2,000 reserve.
+    assert!(deposit_fairness("v", "token0", 1_000, 1_000, 2_000, 2_000, 1).is_none());
+    // One unit of rounding is tolerated.
+    assert!(deposit_fairness("v", "token0", 1_000, 999, 2_000, 2_000, 1).is_none());
+    // Inflated price: attacker holds 1 share over a 1,000,001 reserve; the
+    // victim's 999,999 buys zero shares.
+    let msg = deposit_fairness("v", "token0", 999_999, 0, 2_000_000, 1, 1).unwrap();
+    assert!(msg.contains("[deposit-fairness]") && msg.contains("lost 999999"), "{msg}");
+}
+
+#[test]
+fn compute_profile_tracks_high_water_and_limit() {
+    use fuzzforge_scenarios::compute;
+    assert!(compute::observe("candidate", "t_swap", "lane", 50_000).is_none());
+    assert!(compute::observe("candidate", "t_swap", "lane", 40_000).is_none());
+    let over = compute::observe("candidate", "t_exit", "lane", compute::limit() + 1).unwrap();
+    assert!(over.starts_with("[compute] lane: t_exit used"), "{over}");
+    let rows = compute::high_water();
+    assert!(rows.iter().any(|r| r.0 == 50_000 && r.2 == "t_swap"));
+    assert!(compute::exhausted(&["Program X failed: exceeded CUs meter at BPF instruction".to_string()]));
+    assert!(!compute::exhausted(&["Program log: fine".to_string()]));
+}
+
+#[test]
+fn outcome_difference_ignores_error_wording() {
+    use fuzzforge_scenarios::diff::outcome_difference;
+    let ok: Result<(), String> = Ok(());
+    let e1: Result<(), String> = Err("a".into());
+    let e2: Result<(), String> = Err("b".into());
+    assert!(outcome_difference("swap", &ok, &ok).is_none());
+    assert!(outcome_difference("swap", &e1, &e2).is_none());
+    let d = outcome_difference("swap", &ok, &e1).unwrap();
+    assert!(d.contains("succeeded on the candidate") && d.contains("failed (a) on the reference"), "{d}");
+}
