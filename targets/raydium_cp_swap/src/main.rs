@@ -39,7 +39,7 @@
 use crucible_fuzzer::anchor_lang::prelude::Clock;
 use crucible_fuzzer::*;
 use fuzzforge_scenarios::anchor::{account_discriminator, det_keypair, read_pubkey, read_u64, AnchorIx};
-use fuzzforge_scenarios::invariants::{deposit_fairness, summarize_logs};
+use fuzzforge_scenarios::invariants::{deposit_fairness, solvency, summarize_logs};
 use fuzzforge_scenarios::token2022::{read_token_account, MintHandle, MintProfile, TokenEnv, SPL_TOKEN_ID, TOKEN_2022_ID};
 use fuzzforge_scenarios::{compute, diff, ShareValueLedger};
 use solana_account::Account;
@@ -934,11 +934,9 @@ fn amm_invariants(fixture: &mut AmmFixture) {
         }
         let Some(v) = fixture.view(p) else { continue };
         let label = fixture.pools[p].label.clone();
-        fuzz_assert!(
-            v.vault0 >= v.fees0 && v.vault1 >= v.fees1,
-            "[solvency] {label}: vaults ({}, {}) hold less than booked fees ({}, {})",
-            v.vault0, v.vault1, v.fees0, v.fees1
-        );
+        if let Some(msg) = solvency(&label, (v.vault0, v.vault1), (v.fees0, v.fees1)) {
+            fuzz_assert!(false, "{}", msg);
+        }
         let (r0, r1) = (v.vault0.saturating_sub(v.fees0), v.vault1.saturating_sub(v.fees1));
         if let Some(msg) = fixture.pools[p].share.observe(&label, r0, r1, v.lp_supply) {
             fuzz_assert!(false, "{}", msg);

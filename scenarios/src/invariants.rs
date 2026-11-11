@@ -113,20 +113,42 @@ fn mul_wide(a: u128, b: u128) -> (u128, u128) {
     (hi, lo)
 }
 
+/// `true` when one LP share is worth less in `now` than in `prev`. Each state
+/// is `(reserve_0, reserve_1, lp_supply)` with reserves net of fees owed to
+/// anyone other than LPs. A zero supply on either side is not comparable and
+/// returns `false`.
+///
+/// This is the whole share-value rule. The fuzz harness asserts it after every
+/// action and the runtime monitor and firewall in `sentinel/` call the same
+/// function on live pool state, so a rule that was fuzzed is the rule enforced.
+pub fn share_value_fell(prev: (u64, u64, u64), now: (u64, u64, u64)) -> bool {
+    let ((p0, p1, plp), (r0, r1, lp)) = (prev, now);
+    if lp == 0 || plp == 0 {
+        return false;
+    }
+    let k_now = r0 as u128 * r1 as u128;
+    let k_prev = p0 as u128 * p1 as u128;
+    mul_wide(k_now, plp as u128 * plp as u128) < mul_wide(k_prev, lp as u128 * lp as u128)
+}
+
+/// Solvency: each vault holds at least the fees booked against it (protocol,
+/// fund, creator). `None` when it does, otherwise the violation.
+pub fn solvency(label: &str, vaults: (u64, u64), fees: (u64, u64)) -> Option<String> {
+    (vaults.0 < fees.0 || vaults.1 < fees.1).then(|| {
+        format!(
+            "[solvency] {label}: vaults ({}, {}) hold less than booked fees ({}, {})",
+            vaults.0, vaults.1, fees.0, fees.1
+        )
+    })
+}
+
 impl ShareValueLedger {
     /// Record the current state and report a violation if share value fell
     /// since the previous call. `lp_supply == 0` resets the baseline.
     pub fn observe(&mut self, label: &str, r0: u64, r1: u64, lp: u64) -> Option<String> {
         let prev = self.last.replace((r0, r1, lp));
         let (p0, p1, plp) = prev?;
-        if lp == 0 || plp == 0 {
-            return None;
-        }
-        let k_now = r0 as u128 * r1 as u128;
-        let k_prev = p0 as u128 * p1 as u128;
-        let lhs = mul_wide(k_now, plp as u128 * plp as u128);
-        let rhs = mul_wide(k_prev, lp as u128 * lp as u128);
-        (lhs < rhs).then(|| {
+        share_value_fell((p0, p1, plp), (r0, r1, lp)).then(|| {
             format!(
                 "[share-value] {label}: LP share value decreased: reserves ({p0}, {p1}) / lp {plp} -> ({r0}, {r1}) / lp {lp}"
             )

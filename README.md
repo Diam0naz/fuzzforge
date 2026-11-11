@@ -57,12 +57,15 @@ fuzzforge/
 ├── scenarios/                  # hostile-scenario library for Crucible harnesses
 │                               #   (Token-2022 mint matrix, invariant ledgers,
 │                               #   upgrade-diff, compute profile)
+├── sentinel/                   # runtime half: monitor + pre-signing firewall that
+│                               #   enforce the fuzzed invariants from a reviewable
+│                               #   policy file (see sentinel/README.md)
 ├── tools/cu-profile.sh         # merge a campaign's compute-unit profile
 └── targets/<program>/          # one standalone Crucible harness per engagement,
                                 #   with findings/ (minimized cases) and REPORT.md
 ```
 
-`scenarios/` and `targets/*` are standalone Cargo workspaces, so Crucible's
+`scenarios/`, `sentinel/` and `targets/*` are standalone Cargo workspaces, so Crucible's
 LiteSVM dependency graph never unifies with the API/worker crates. See
 [targets/token_vault/REPORT.md](targets/token_vault/REPORT.md) for a sample
 deliverable.

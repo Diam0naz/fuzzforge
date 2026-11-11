@@ -1,0 +1,71 @@
+# Sentinel policy for Raydium CP-Swap.
+#
+# Every rule below is enforced by `sentinel check` (firewall, before signing)
+# and/or `sentinel watch` (monitor, after landing). The rule set is closed: an
+# unknown rule id or field makes the file fail to load, so nothing listed here
+# can be silently unenforced. Each decision records this file's SHA-256.
+#
+# action: alert = record and continue; hold = wait for a person; block = refuse.
+
+name = "raydium-cp-swap"
+version = 1
+program = "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C"
+
+[rules.solvency]
+action = "block"
+why = "Each vault must hold at least the protocol, fund and creator fees booked against it. A transaction that leaves a pool owing more than it holds is refused."
+evidence = "Fuzzed: targets/raydium_cp_swap, 9 pools across the Token-2022 mint matrix, 0 violations over ~0.9M stateless executions and ~2.3M stateful iterations (2026-11-10/11)."
+
+[rules.share-value]
+action = "block"
+why = "sqrt(r0*r1)/lp_supply over LP-owned reserves never falls. A drop means value left the LPs: rounding, transfer-fee accounting or a vault drain."
+evidence = "Fuzzed: same campaigns, 0 violations; the planted skim canary (FF_CANARY=1) fires within seconds. Backtest 2026-11-11, pool 54Gt…qXmS, slots 468115961-468129253: 160 comparisons over 161 swap events, 0 fired. Monitor: 20 rounds on 3 pools, 0 fired."
+
+[rules.reserve-outflow]
+action = "alert"
+max_bps = 1000
+why = "One instruction taking more than 10% of a reserve is unusual on a deep pool and is how a drain looks. Legitimate on thin pools, hence alert only."
+evidence = "Backtest 2026-11-11, pool 54Gt…qXmS: 0 of 161 swaps fired. Drill: a swap of half the input reserve fires at 3,323 bps."
+
+[rules.slippage-headroom]
+action = "hold"
+max_bps = 300
+why = "Measured on the user's own token accounts. A signed bound more than 3% looser than the simulated outcome is what a sandwich needs; a bound the program breaks is always blocked."
+evidence = "Fuzzed: exact-limit and one-unit-tighter dry runs on every swap, deposit and withdrawal, 0 violations."
+
+[rules.program-allowlist]
+action = "hold"
+why = "Only these programs may run in a transaction this firewall signs off on. Anything else (a router, an unknown CPI target) waits for a person."
+evidence = "Drill 2026-11-11: an honest swap plus a Memo v1 instruction is held; honest swaps alone pass."
+programs = [
+  "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C  raydium cp-swap",
+  "11111111111111111111111111111111             system",
+  "ComputeBudget111111111111111111111111111111  compute budget",
+  "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA  spl token",
+  "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb  token-2022",
+  "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL associated token account",
+  "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr  memo v3",
+]
+
+[rules.program-upgrade]
+action = "hold"
+sha256 = "c383e1c5b1f578f3d1bf42f12360fca67225b9adda0f3b6c293ad0d6b966818d"
+why = "The rules were validated against this build. A redeploy holds everything until the upgrade-diff campaign has run on the new bytes."
+evidence = "Upgrade-diff: local build vs this mainnet dump, 132k executions / 1.69M instructions, 0 differences (2026-11-11)."
+
+[rules.compute-budget]
+action = "alert"
+max_units = 400000
+why = "Fuzzed worst case for any single CP-Swap instruction is 106k units (initialize). A transaction far above that is doing something else."
+
+[rules.must-simulate]
+action = "block"
+why = "A transaction that fails against current state is not signed."
+evidence = "Drill 2026-11-11: a bound one unit above the quote fails in the fork with the program's ExceededSlippage and is blocked."
+
+[rules.failed-burst]
+action = "alert"
+window = 20
+max_failed = 15
+why = "Many failing transactions against one pool in a short window is what probing looks like: an attacker, human or agent, searching for an input that works."
+evidence = "NOISY, tune per pool: backtest 2026-11-11, pool 54Gt…qXmS had 116 of 300 transactions fail (bot traffic) and 38 windows crossed this limit. Monitor fired once in 20 rounds, on 3N1C…PJvj (17 of 20 failed)."

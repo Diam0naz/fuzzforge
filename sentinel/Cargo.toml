@@ -1,0 +1,38 @@
+[package]
+name = "fuzzforge-sentinel"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+license = "MIT"
+description = "Runtime side of Fuzzforge: a transaction monitor and a pre-signing firewall that enforce the invariants the fuzz campaigns validated, from a reviewable policy file."
+
+# Standalone, like scenarios/ and targets/*: the LiteSVM dependency graph must
+# not unify with the API/worker workspace.
+[workspace]
+
+[[bin]]
+name = "sentinel"
+path = "src/main.rs"
+
+[dependencies]
+fuzzforge-scenarios = { path = "../scenarios" }
+crucible-test-context = { git = "https://github.com/asymmetric-research/crucible", rev = "26c23914548035d51b86e885e86f5e3ebafb88ee" }
+solana-account = "4"
+solana-clock = "3"
+solana-instruction = "3.0"
+solana-keypair = "3.0"
+solana-message = "4"
+solana-pubkey = "3.0"
+solana-signer = "3.0"
+solana-transaction = { version = "4", features = ["serde", "wincode"] }
+wincode = "0.5"
+
+anyhow = "1"
+base64 = "0.22"
+bs58 = "0.5"
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+toml = "0.8"
+ureq = { version = "3", features = ["json"] }
