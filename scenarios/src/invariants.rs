@@ -142,6 +142,32 @@ pub fn solvency(label: &str, vaults: (u64, u64), fees: (u64, u64)) -> Option<Str
     })
 }
 
+/// Vault invariant: assets per share never fall. `prev` and `now` are
+/// `(assets, shares)`. This is the share-value rule for a single-asset vault
+/// (a stake pool, a lending reserve's cToken, an ERC-4626-style vault): a
+/// correct deposit rounds the shares it mints down and a correct withdrawal
+/// rounds the assets it pays down, so neither lowers the rate. Zero shares on
+/// either side is not comparable and returns `false`.
+pub fn vault_rate_fell(prev: (u64, u64), now: (u64, u64)) -> bool {
+    let ((a, s), (a2, s2)) = (prev, now);
+    if s == 0 || s2 == 0 {
+        return false;
+    }
+    // a2 / s2 < a / s  <=>  a2 * s < a * s2
+    (a2 as u128) * (s as u128) < (a as u128) * (s2 as u128)
+}
+
+/// Supply invariant: the share mint's real supply never exceeds the supply
+/// the program's own accounting records. Shares minted outside the
+/// accounting (an unchecked mint authority, a missed update) dilute every
+/// holder. The reverse, a holder burning their own shares, is a donation and
+/// is allowed.
+pub fn supply_inflated(label: &str, recorded: u64, mint_supply: u64) -> Option<String> {
+    (mint_supply > recorded).then(|| {
+        format!("[supply] {label}: share mint supply {mint_supply} exceeds the {recorded} the program accounts for ({} unbacked)", mint_supply - recorded)
+    })
+}
+
 impl ShareValueLedger {
     /// Record the current state and report a violation if share value fell
     /// since the previous call. `lp_supply == 0` resets the baseline.

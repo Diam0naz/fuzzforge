@@ -10,7 +10,8 @@
 //! counts are the false-alarm evidence a policy reviewer signs off on.
 
 use crate::check::{now, short};
-use crate::cpswap::{events, Event, PoolKeys, PoolView};
+use crate::cpswap::{events, Event, PoolKeys};
+use crate::protocol::{Market, Protocol, Snapshot};
 use crate::policy::{Finding, Policy};
 use crate::rpc::{Rpc, SigInfo};
 use crate::rules;
@@ -21,6 +22,20 @@ use sha2::{Digest, Sha256};
 use solana_pubkey::Pubkey;
 use std::collections::{BTreeMap, HashSet};
 use std::io::Write;
+
+pub fn load_markets(rpc: &Rpc, protocol: Protocol, program: &Pubkey, keys: &[Pubkey]) -> Result<Vec<Market>> {
+    let (_, accounts) = rpc.accounts(keys)?;
+    keys.iter()
+        .zip(accounts)
+        .map(|(k, a)| {
+            let a = a.ok_or_else(|| anyhow!("{k} does not exist"))?;
+            if a.owner != *program {
+                return Err(anyhow!("{k} is owned by {}, not {program}", a.owner));
+            }
+            protocol.market(*k, &a.data).ok_or_else(|| anyhow!("{k} is not a {} market", protocol.name()))
+        })
+        .collect()
+}
 
 pub fn load_pools(rpc: &Rpc, program: &Pubkey, pools: &[Pubkey]) -> Result<Vec<PoolKeys>> {
     let (_, accounts) = rpc.accounts(pools)?;
@@ -69,13 +84,14 @@ pub struct WatchArgs<'a> {
 
 pub fn watch(rpc: &Rpc, policy: &Policy, args: WatchArgs, out: &mut dyn Write) -> Result<()> {
     let program = policy.program_id();
-    let pools = load_pools(rpc, &program, args.pools)?;
+    let protocol = policy.protocol;
+    let pools = load_markets(rpc, protocol, &program, args.pools)?;
     let programdata = programdata_address(rpc, &program)?;
     let mut known_deploy = deploy_slot(rpc, &programdata)?;
     let mut first: Vec<Finding> = Vec::new();
     rules::upgrade(policy, &deployed_sha256(rpc, &programdata)?, &mut first);
 
-    let mut last_view: Vec<Option<PoolView>> = vec![None; pools.len()];
+    let mut last_view: Vec<Option<Snapshot>> = vec![None; pools.len()];
     let mut last_sig: Vec<Option<String>> = vec![None; pools.len()];
     let mut recent: Vec<Vec<bool>> = vec![Vec::new(); pools.len()];
     let mut firing: HashSet<(usize, &'static str)> = HashSet::new();
@@ -97,25 +113,26 @@ pub fn watch(rpc: &Rpc, policy: &Policy, args: WatchArgs, out: &mut dyn Write) -
     loop {
         round += 1;
         let (mut n_tx, mut n_alerts) = (0usize, 0usize);
-        let keys: Vec<Pubkey> = pools.iter().flat_map(|p| [p.state, p.vault0, p.vault1]).collect();
+        let keys: Vec<Pubkey> = pools.iter().flat_map(|m| m.reads.clone()).collect();
         let (slot, accounts) = rpc.accounts(&keys)?;
+        let mut at = 0;
         for (i, pool) in pools.iter().enumerate() {
-            let label = short(&pool.state);
-            let (p, a, b) = (&accounts[3 * i], &accounts[3 * i + 1], &accounts[3 * i + 2]);
+            let label = short(&pool.key);
+            let mine = &accounts[at..at + pool.reads.len()];
+            at += pool.reads.len();
             let mut found = Vec::new();
-            if let (Some(p), Some(a), Some(b)) = (p, a, b) {
-                if let Some(now_view) = PoolView::decode(&p.data, &a.data, &b.data) {
-                    // Reserve outflow between rounds aggregates many trades; the
-                    // per-instruction check below is the meaningful one.
-                    let mut state_findings = Vec::new();
-                    rules::pool_transition(policy, &label, last_view[i], now_view, &mut state_findings);
-                    found.extend(state_findings.into_iter().filter(|f| f.rule != "reserve-outflow"));
-                    last_view[i] = Some(now_view);
-                }
+            let data: Option<Vec<&[u8]>> = mine.iter().map(|a| a.as_ref().map(|a| a.data.as_slice())).collect();
+            if let Some(now_snap) = data.and_then(|d| protocol.snapshot(&label, &d)) {
+                // Reserve outflow between rounds aggregates many trades; the
+                // per-instruction check below is the meaningful one.
+                let mut state_findings = Vec::new();
+                rules::transition(policy, protocol, &label, last_view[i].as_ref(), &now_snap, &mut state_findings);
+                found.extend(state_findings.into_iter().filter(|f| f.rule != "reserve-outflow"));
+                last_view[i] = Some(now_snap);
             }
 
             let limit = if last_sig[i].is_none() { 20 } else { 100 };
-            let sigs = chronological(rpc.signatures(&pool.state, limit, last_sig[i].as_deref(), None)?);
+            let sigs = chronological(rpc.signatures(&pool.key, limit, last_sig[i].as_deref(), None)?);
             if let Some(newest) = sigs.last() {
                 last_sig[i] = Some(newest.signature.clone());
             }
@@ -127,16 +144,17 @@ pub fn watch(rpc: &Rpc, policy: &Policy, args: WatchArgs, out: &mut dyn Write) -
             recent[i].drain(..excess);
             rules::burst(policy, &label, &recent[i], &mut found);
 
-            for s in sigs.iter().filter(|s| !s.failed).rev().take(args.max_tx_per_round) {
+            let logged_events = protocol == Protocol::RaydiumCpSwap;
+            for s in sigs.iter().filter(|s| logged_events && !s.failed).rev().take(args.max_tx_per_round) {
                 let Some(tx) = rpc.transaction(&s.signature)? else { continue };
                 n_tx += 1;
                 let (evs, _) = events(&program, &tx.logs);
                 let mut tx_findings = Vec::new();
-                for ev in evs.iter().filter(|e| e.pool() == pool.state) {
+                for ev in evs.iter().filter(|e| e.pool() == pool.key) {
                     rules::event_outflow(policy, &label, ev, &mut tx_findings);
                 }
                 for f in &tx_findings {
-                    emit(out, tx.slot, Some(&pool.state), Some(&s.signature), f)?;
+                    emit(out, tx.slot, Some(&pool.key), Some(&s.signature), f)?;
                     n_alerts += 1;
                 }
             }
@@ -146,7 +164,7 @@ pub fn watch(rpc: &Rpc, policy: &Policy, args: WatchArgs, out: &mut dyn Write) -
             let now_firing: HashSet<&'static str> = found.iter().map(|f| f.rule).collect();
             for f in &found {
                 if f.rule == "share-value" || !firing.contains(&(i, f.rule)) {
-                    emit(out, slot, Some(&pool.state), None, f)?;
+                    emit(out, slot, Some(&pool.key), None, f)?;
                     n_alerts += 1;
                 }
             }
@@ -188,11 +206,16 @@ pub struct Backtest {
     pub lp_events: usize,
     pub share_value_comparisons: usize,
     pub burst_windows_flagged: usize,
+    /// Largest share of a reserve one legitimate instruction removed.
+    pub max_outflow_bps: u64,
     pub fired: BTreeMap<String, usize>,
     pub examples: Vec<(String, Finding)>,
 }
 
 pub fn backtest(rpc: &Rpc, policy: &Policy, pool: &Pubkey, limit: usize) -> Result<Backtest> {
+    if policy.protocol != Protocol::RaydiumCpSwap {
+        return Err(anyhow!("backtest replays logged events, which {} does not emit; use `watch` for evidence", policy.protocol.name()));
+    }
     let program = policy.program_id();
     let keys = load_pools(rpc, &program, &[*pool])?.remove(0);
     let label = short(pool);
@@ -243,6 +266,14 @@ pub fn backtest(rpc: &Rpc, policy: &Policy, pool: &Pubkey, limit: usize) -> Resu
         let mut found = Vec::new();
         for ev in evs.iter().filter(|e| e.pool() == *pool) {
             rules::event_outflow(policy, &label, ev, &mut found);
+            let legs: Vec<(u64, u64)> = match *ev {
+                Event::Swap { output_before, output_amount, .. } => vec![(output_amount, output_before)],
+                Event::Lp { withdraw: true, amount0, amount1, r0_before, r1_before, .. } => vec![(amount0, r0_before), (amount1, r1_before)],
+                Event::Lp { .. } => vec![],
+            };
+            for (removed, before) in legs {
+                bt.max_outflow_bps = bt.max_outflow_bps.max(rules::bps(removed, before));
+            }
             let (now, ends_segment) = match *ev {
                 Event::Swap { input_before, output_before, input_mint, .. } => {
                     bt.swap_events += 1;

@@ -12,14 +12,20 @@ enforce after it, from one policy file a person can review.
  upgrade-diff campaign  ──────────────► program-upgrade pin
 ```
 
-The share-value and solvency checks are the same functions
-(`fuzzforge_scenarios::invariants::{share_value_fell, solvency}`) that the
-CP-Swap harness asserts. A rule's false-alarm rate is therefore a measured
+The value-per-share and solvency checks are the same functions in
+`fuzzforge_scenarios::invariants` that the fuzz harnesses assert. A rule's false-alarm rate is therefore a measured
 number: the campaign shows how often it fired on legitimate activity, and the
 planted-fault canary shows that it fires on a real fault.
 
-Sentinel never sends a transaction. The firewall simulates locally and the
-monitor only reads.
+Sentinel never sends a transaction. The firewall simulates locally, and the
+monitor and tracer only read.
+
+Two protocol adapters share one engine (`src/protocol.rs`):
+
+| Protocol | Shape | Value per share | Solvency |
+|---|---|---|---|
+| `raydium-cp-swap` | two reserves, LP shares | `sqrt(r0·r1)/lp` never falls | vaults ≥ booked fees |
+| `spl-stake-pool` (JitoSOL, bSOL, most LSTs) | one asset, pool-token shares | lamports per pool token never falls | mint supply ≤ the pool's recorded supply (no unbacked tokens) |
 
 ## Commands
 
@@ -34,7 +40,13 @@ $B replay --policy $P --signature <sig>    # firewall on a real past transaction
 $B drill  --policy $P --pool <pool> [--candidate-so other.so]   # fresh test cases, pass/fail
 $B watch  --policy $P --pool <pool>... [--interval 15] [--out findings.jsonl]
 $B backtest --policy $P --pool <pool> --limit 300
+$B trace  --signature <sig> [--from <victim>] [--hops 2] --report incident.md   # follow the funds
+$B vet    --policy draft.toml --pool <pool>... [--candidate-so other.so]          # measure every rule
+$B sign   --policy vetted.toml --reviewer "Name"                                  # human sign-off
 ```
+
+`./demo.sh` runs policy review, both drills, a short watch and a trace
+against mainnet in about five minutes.
 
 `--rpc` (or `SENTINEL_RPC`) selects the endpoint; it defaults to public mainnet.
 `check` and `replay` exit 0 to allow, 1 to allow with an alert, 2 to hold and
@@ -64,12 +76,62 @@ the policy file that produced it.
 | `must-simulate` | ✓ | | the transaction fails against current state |
 | `failed-burst` | | ✓ | more than `max_failed` of the last `window` transactions on a pool failed (probing) |
 
+## Drafted, vetted, signed
+
+A policy goes through three hands before it protects anything:
+
+1. **Drafted** by a person or by an agent following [`AGENTS.md`](AGENTS.md).
+   A draft can only choose rules from the closed set and set their
+   parameters, so a drafter, human or model, cannot invent a check that
+   nothing enforces. `drafted_by` records who drafted it.
+2. **Vetted** by `sentinel vet`, which measures every rule. Drill cases
+   check that each rule fires on the case built for it and stays quiet on
+   the honest one. Backtests and watch rounds count any finding on real,
+   landed transactions as a false alarm. Each rule gets a `vetted` line:
+
+   | Verdict | Meaning |
+   |---|---|
+   | `OK` | Quiet on legitimate activity and fires on its drill case. |
+   | `QUIET` | Quiet on legitimate activity, but nothing here makes it fire. |
+   | `NOISY` | An alert rule that fired on legitimate activity. |
+   | `REJECT` | A hold or block rule that fired on legitimate activity, or a rule that missed its own drill case. |
+   | `UNTESTED` | Nothing exercised it. |
+
+3. **Signed** by a person with `sentinel sign`, which refuses rejected or
+   unvetted rules. The sign-off records the SHA-256 of the file above it, so
+   any later edit, such as weakening a rule, makes it stale. Every firewall
+   decision records who signed the policy it was made under, or `null`.
+
+## How tracing works
+
+`trace` starts from one transaction: a monitor finding, or the exploit
+itself. Per asset, wallets whose balance fell are sources and wallets whose
+balance rose are sinks. With several of each in one transaction, value is
+split pro rata and the edge is marked *inferred*. The trace then reads each
+tainted wallet's later transactions, oldest first, for `--hops` hops.
+
+Off-curve destinations (PDAs: pool vaults, program authorities) are named
+and not followed, because value there belongs to a program. A `--labels`
+file names known addresses, for example exchange deposit wallets, and stops
+the trace there. The Markdown report includes:
+
+- a timeline;
+- a Mermaid flow graph;
+- the token accounts still holding traced tokens;
+- each mint's freeze authority, i.e. which issuers can freeze those
+  accounts and should be contacted first.
+
+Taint is per wallet: once a wallet is reached, everything it sends later is
+followed, including value it held before. This over-approximates on purpose,
+and an analyst prunes it.
+
 ## How the firewall works
 
 1. Decode the transaction (legacy, v0 or v1) and resolve address lookup tables.
 2. Clone every account it names from the RPC into a local LiteSVM at one slot,
-   including upgradeable programs' deployed bytes, plus the vaults of every
-   CP-Swap pool it touches, whether it calls the pool directly or through a
+   including upgradeable programs' deployed bytes, plus the accounts a
+   snapshot of every market it touches needs (CP-Swap vaults, a stake pool's
+   mint), whether it calls the pool directly or through a
    router. It also copies the cluster clock.
 3. Run it, then compare pool state and the user's token balances before and
    after.
@@ -94,9 +156,13 @@ event, but the monitor will not take it as CP-Swap's.
 
 ## Verified on mainnet (2026-11-11)
 
-- **Unit tests** (`cargo test`, 9 passing): policy loading rejects typos and
-  unknown fields; each rule fires on its canary and stays quiet at its limit;
-  forged events are ignored; instruction decoding.
+- **Unit tests** (`cargo test`, 13 passing). They cover:
+  - policy loading rejects typos and unknown fields;
+  - each rule fires on its canary and stays quiet at its limit;
+  - forged events are ignored;
+  - instruction and stake-pool layout decoding;
+  - trace flow attribution (fees, swaps, pro rata, rent noise);
+  - sign-off gating and staleness.
 - **Drill** on live pool `54GtpHJaEGKsfq6pWSRJa656zRgVFhkC5fzQBmp7qXmS`
   against one state snapshot: 6 of 6 cases reached the expected verdict.
 
@@ -128,13 +194,47 @@ event, but the monitor will not take it as CP-Swap's.
   crossed the 15-of-20 limit. The policy's evidence line says so; the limit
   should be tuned per pool.
 
+- **Stake pool drill** on JitoSOL (`Jito4APyf642JPZPx3hGc6WWJ8zPKtRbRs4P815Awbb`):
+  4 of 4. A 1 SOL deposit at the exact quote (762,809,120 pool tokens) is
+  allowed. A bound one token tighter is blocked by the program itself. An
+  unlisted program is held. One unbacked pool token planted in the fork's
+  mint is blocked by `solvency`.
+- **Stake pool monitor**: 15 rounds on JitoSOL and bSOL, no findings, and the
+  pinned program hash matched. No epoch boundary fell in the window, so the
+  epoch-update path (where rewards are booked) has not been observed.
+- **Trace** from three real CP-Swap swaps, with the vault authority as the
+  "victim". This is a demonstration of the mechanics, not an incident: one
+  run reached 7 addresses over 1 followed hop. It recorded the swapper's
+  onward transfers, named six program-owned destinations without following
+  them, and found the traced token still in the swapper's account, whose
+  mint has no freeze authority.
+
+- **Vet**, CP-Swap policy, on `54Gt…qXmS` and `3N1C…PJvj` with
+  `--candidate-so`, 200-transaction backtests and 6 watch rounds:
+  - **OK:** must-simulate, slippage-headroom, program-allowlist,
+    program-upgrade and reserve-outflow.
+  - **QUIET:** solvency, share-value and compute-budget.
+  - **NOISY:** failed-burst.
+
+  An earlier vet an hour before found one legitimate swap taking 1,024 bps
+  of a reserve. That made reserve-outflow NOISY against its 1,000 bps alert
+  threshold; the later window peaked at 646 bps.
+- **Vet**, agent-drafted stake-pool policy, on JitoSOL and bSOL:
+  - **OK:** solvency, must-simulate and program-allowlist.
+  - **QUIET:** share-value, reserve-outflow, program-upgrade and
+    failed-burst.
+
+  Neither policy is signed: signing is a person's step.
+
 ## Not done yet
 
-- Only CP-Swap has an adapter (`src/cpswap.rs`). Another protocol needs
-  layouts, events and its invariants; the rule engine, fork and policy loader
-  are shared.
-- Drills need pools of plain mints. They skip pools whose Token-2022 mints
-  have extensions, because their token accounts need extension space.
-- Fund tracing and incident coordination are not built. Findings already
-  carry the slot, signature, pool and policy hash, which is the input a
-  tracer would start from.
+- **Adapters:** CP-Swap and SPL Stake Pool only. Another protocol needs its
+  layouts and its value-per-share and solvency predicates; the rule engine,
+  fork, monitor, tracer and policy loader are shared.
+- **Stake pool evidence:** no fuzz campaign yet, so its solvency and
+  share-value rules are vetted on live state and drills only. It has no
+  backtest, because the program logs no events.
+- **Drills need plain mints:** they skip CP-Swap pools whose Token-2022
+  mints have extensions, because their token accounts need extension space.
+- **Trace:** taint is per wallet, inferred edges are pro rata, and there is
+  no shipped label set for exchanges or bridges (bring your own `--labels`).

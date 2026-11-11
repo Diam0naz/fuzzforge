@@ -11,6 +11,8 @@ use crate::cpswap::{token_amount, PoolKeys};
 use crate::fork::{Fork, Overlay};
 use crate::monitor::load_pools;
 use crate::policy::Policy;
+use crate::protocol::Protocol;
+use crate::stakepool::{mint_supply, StakePool};
 use crate::rpc::Rpc;
 use anyhow::{bail, Result};
 use fuzzforge_scenarios::anchor::{det_keypair, AnchorIx};
@@ -29,6 +31,9 @@ const TOKEN_ACCOUNT_RENT: u64 = 2_039_280;
 pub struct Case {
     pub name: &'static str,
     pub expect: &'static str,
+    /// The rule this case exists to trigger; `None` for an honest case,
+    /// where any finding is a false alarm.
+    pub targets: Option<&'static str>,
     pub decision: Decision,
 }
 
@@ -54,6 +59,22 @@ fn tx(ixs: &[Instruction], payer: &Pubkey) -> VersionedTransaction {
 }
 
 pub fn drill(rpc: &Rpc, policy: &Policy, pool: &Pubkey, candidate_so: Option<&str>) -> Result<Vec<Case>> {
+    match policy.protocol {
+        Protocol::RaydiumCpSwap => drill_cp_swap(rpc, policy, pool, candidate_so),
+        Protocol::SplStakePool => {
+            if candidate_so.is_some() {
+                bail!("--candidate-so is only wired for CP-Swap drills");
+            }
+            drill_stake_pool(rpc, policy, pool)
+        }
+    }
+}
+
+fn user_system_account() -> Account {
+    Account { lamports: 10_000_000_000, data: vec![], owner: Pubkey::default(), executable: false, rent_epoch: 0 }
+}
+
+fn drill_cp_swap(rpc: &Rpc, policy: &Policy, pool: &Pubkey, candidate_so: Option<&str>) -> Result<Vec<Case>> {
     let program = policy.program_id();
     let keys: PoolKeys = load_pools(rpc, &program, &[*pool])?.remove(0);
     let (_, mints) = rpc.accounts(&[keys.mint0, keys.mint1, keys.vault0])?;
@@ -135,11 +156,94 @@ pub fn drill(rpc: &Rpc, policy: &Policy, pool: &Pubkey, candidate_so: Option<&st
         cases.push(("honest swap on a different build of the program", "hold", tx(&[swap(small, honest)], &user), Some(std::fs::read(path)?)));
     }
     let names = ["honest", "loose", "tight", "whale", "foreign", "upgrade"];
+    let targets = [None, Some("slippage-headroom"), Some("must-simulate"), Some("reserve-outflow"), Some("program-allowlist"), Some("program-upgrade")];
     let mut out = Vec::new();
     for (i, (name, expect, t, so)) in cases.drain(..).enumerate() {
         let amount = if names[i] == "whale" { whale } else { small };
         let decision = check_with(rpc, policy, &t, &overlay(amount, so))?;
-        out.push(Case { name, expect, decision });
+        out.push(Case { name, expect, targets: targets[i], decision });
+    }
+    Ok(out)
+}
+
+/// SOL deposits into a live stake pool from a synthetic user, on one snapshot
+/// of the pool, its reserve, mint and fee account.
+fn drill_stake_pool(rpc: &Rpc, policy: &Policy, pool_key: &Pubkey) -> Result<Vec<Case>> {
+    const SYSTEM: Pubkey = Pubkey::from_str_const("11111111111111111111111111111111");
+    let program = policy.program_id();
+    let (_, acc) = rpc.accounts(&[*pool_key])?;
+    let acc = acc.into_iter().next().flatten().ok_or_else(|| anyhow::anyhow!("{pool_key} does not exist"))?;
+    let pool = StakePool::decode(*pool_key, &acc.data).ok_or_else(|| anyhow::anyhow!("{pool_key} is not a stake pool"))?;
+    if pool.sol_deposit_authority.is_some() {
+        bail!("this pool restricts SOL deposits to an authority; drills need a permissionless pool");
+    }
+    let pinned = [*pool_key, pool.reserve_stake, pool.pool_mint, pool.manager_fee_account];
+    let (snapshot_slot, snap) = rpc.accounts(&pinned)?;
+    let snapshot: Vec<(Pubkey, Account)> = pinned.iter().zip(snap).filter_map(|(k, a)| a.map(|a| (*k, a))).collect();
+    eprintln!("[drill] stake pool snapshot at slot {snapshot_slot}");
+
+    let user = det_keypair("sentinel-drill-user").pubkey();
+    let user_tokens = det_keypair("sentinel-drill-pool-tokens").pubkey();
+    let withdraw_authority = pool.withdraw_authority(&program);
+    let overlay = |plant_unbacked: bool| {
+        let mut accounts: Vec<(Pubkey, Account)> = snapshot.clone();
+        if plant_unbacked {
+            for (k, a) in accounts.iter_mut() {
+                if *k == pool.pool_mint {
+                    let supply = mint_supply(&a.data).unwrap_or(0) + 1;
+                    a.data[36..44].copy_from_slice(&supply.to_le_bytes());
+                }
+            }
+        }
+        accounts.push((user, user_system_account()));
+        accounts.push((user_tokens, token_account(&pool.pool_mint, &user, &pool.token_program, 0)));
+        Overlay { accounts, program: None }
+    };
+    // DepositSol = 14, DepositSolWithSlippage = 25 (StakePoolInstruction).
+    let deposit = |lamports: u64, minimum_out: Option<u64>| {
+        let mut data = vec![if minimum_out.is_some() { 25 } else { 14 }];
+        data.extend_from_slice(&lamports.to_le_bytes());
+        if let Some(m) = minimum_out {
+            data.extend_from_slice(&m.to_le_bytes());
+        }
+        Instruction {
+            program_id: program,
+            accounts: vec![
+                AccountMeta::new(*pool_key, false),
+                AccountMeta::new_readonly(withdraw_authority, false),
+                AccountMeta::new(pool.reserve_stake, false),
+                AccountMeta::new(user, true),
+                AccountMeta::new(user_tokens, false),
+                AccountMeta::new(pool.manager_fee_account, false),
+                AccountMeta::new(user_tokens, false), // referrer: the user
+                AccountMeta::new(pool.pool_mint, false),
+                AccountMeta::new_readonly(SYSTEM, false),
+                AccountMeta::new_readonly(pool.token_program, false),
+            ],
+            data,
+        }
+    };
+    let one_sol = 1_000_000_000;
+    let t = tx(&[deposit(one_sol, None)], &user);
+    let mut fork = Fork::build(rpc, &t, &[], &overlay(false))?;
+    let sim = fork.simulate(&t);
+    if !sim.ok {
+        bail!("quote deposit failed: {:?} {}", sim.error, fuzzforge_scenarios::invariants::summarize_logs(&sim.logs));
+    }
+    let quote = fork.post(&user_tokens).and_then(|a| token_amount(&a.data)).unwrap_or(0);
+    eprintln!("[drill] 1 SOL mints {quote} pool tokens");
+    let memo = Instruction { program_id: MEMO_V1, accounts: vec![AccountMeta::new_readonly(user, true)], data: b"drill".to_vec() };
+
+    let cases: Vec<(&'static str, &'static str, Option<&'static str>, VersionedTransaction, bool)> = vec![
+        ("deposit 1 SOL, minimum = quote", "allow", None, tx(&[deposit(one_sol, Some(quote))], &user), false),
+        ("deposit 1 SOL, minimum one token above quote", "block", Some("must-simulate"), tx(&[deposit(one_sol, Some(quote + 1))], &user), false),
+        ("deposit plus an unlisted program", "hold", Some("program-allowlist"), tx(&[deposit(one_sol, Some(quote)), memo], &user), false),
+        ("canary: one unbacked pool token planted in the mint", "block", Some("solvency"), tx(&[deposit(one_sol, Some(quote))], &user), true),
+    ];
+    let mut out = Vec::new();
+    for (name, expect, targets, t, plant) in cases {
+        let decision = check_with(rpc, policy, &t, &overlay(plant))?;
+        out.push(Case { name, expect, targets, decision });
     }
     Ok(out)
 }

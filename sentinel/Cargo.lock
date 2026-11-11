@@ -1557,6 +1557,7 @@ dependencies = [
  "solana-signer",
  "solana-transaction",
  "toml",
+ "toml_edit 0.22.27",
  "ureq",
  "wincode 0.5.5",
 ]

@@ -65,3 +65,25 @@ fn outcome_difference_ignores_error_wording() {
     let d = outcome_difference("swap", &ok, &e1).unwrap();
     assert!(d.contains("succeeded on the candidate") && d.contains("failed (a) on the reference"), "{d}");
 }
+
+#[test]
+fn vault_rate_detects_drop_and_allows_rounding_in_the_vaults_favour() {
+    use fuzzforge_scenarios::invariants::vault_rate_fell;
+    let (l, s) = (10_235_872_059_163_881u64, 7_808_016_567_176_049u64);
+    // Deposit of 1 SOL minting floor(1e9 * s / l) shares: rate cannot fall.
+    let minted = (1_000_000_000u128 * s as u128 / l as u128) as u64;
+    assert!(!vault_rate_fell((l, s), (l + 1_000_000_000, s + minted)));
+    // Minting one share more than that would dilute holders.
+    assert!(vault_rate_fell((l, s), (l + 1_000_000_000, s + minted + 1)));
+    // Losing one lamport with no shares burnt.
+    assert!(vault_rate_fell((l, s), (l - 1, s)));
+    assert!(!vault_rate_fell((l, 0), (0, 0)));
+}
+
+#[test]
+fn supply_inflation_is_one_sided() {
+    use fuzzforge_scenarios::invariants::supply_inflated;
+    assert!(supply_inflated("p", 100, 100).is_none());
+    assert!(supply_inflated("p", 100, 99).is_none(), "a holder burning shares is a donation");
+    assert!(supply_inflated("p", 100, 101).is_some());
+}

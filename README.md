@@ -68,7 +68,8 @@ fuzzforge/
 `scenarios/`, `sentinel/` and `targets/*` are standalone Cargo workspaces, so Crucible's
 LiteSVM dependency graph never unifies with the API/worker crates. See
 [targets/token_vault/REPORT.md](targets/token_vault/REPORT.md) for a sample
-deliverable.
+deliverable, and [docs/case-study-raydium-cp-swap.md](docs/case-study-raydium-cp-swap.md)
+for a full before-and-after-launch case study.
 
 The only deliberate deviation from the original sketch is `common/`: the API
 and worker are separate binaries, and the queue/job contract must not exist

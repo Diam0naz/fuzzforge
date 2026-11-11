@@ -1,0 +1,60 @@
+# Sentinel policy for the SPL Stake Pool program (JitoSOL and most LSTs).
+#
+# Drafted by an agent following sentinel/AGENTS.md, then measured by
+# `sentinel vet` (the `vetted` lines). No fuzz campaign or upgrade-diff run
+# has been done against this program yet, so no rule has an `evidence` line.
+#
+# action: alert = record and continue; hold = wait for a person; block = refuse.
+
+name = "spl-stake-pool"
+version = 1
+protocol = "spl-stake-pool"
+program = "SPoo1Ku8WFXoNDMHPsrGSTSG1Y47rzgn41SLUNakuHy"
+drafted_by = "agent: Claude Code (claude-opus-5-5), from the on-chain StakePool layout and DepositSol flow; following sentinel/AGENTS.md"
+
+[rules.solvency]
+action = "block"
+why = "The pool mint must never hold more supply than the pool's own pool_token_supply. Unbacked pool tokens dilute every holder (the infinite-mint class). A holder burning their own tokens lowers the mint supply and is allowed."
+vetted = '2026-11-11 OK: quiet on legitimate activity, fired on drill case "canary: one unbacked pool token planted in the mint" [basis: 4 drill cases on Jito…Awbb; 8 watch rounds on 2 markets]'
+
+[rules.share-value]
+action = "block"
+why = "Lamports per pool token never fall. Deposits round minted tokens down and withdrawals round lamports down; only lost stake could lower the rate, and stake is not slashed on Solana today."
+vetted = "2026-11-11 QUIET: quiet on legitimate activity; nothing in this vet makes it fire, so its positive evidence must come from a fuzz campaign's planted-fault canary [basis: 4 drill cases on Jito…Awbb; 8 watch rounds on 2 markets]"
+
+[rules.reserve-outflow]
+action = "alert"
+max_bps = 500
+why = "One transaction removing more than 5% of the pool's lamports is a run on the pool or a drain."
+vetted = "2026-11-11 QUIET: quiet on legitimate activity; nothing in this vet makes it fire, so its positive evidence must come from a fuzz campaign's planted-fault canary [basis: 4 drill cases on Jito…Awbb; 8 watch rounds on 2 markets]"
+
+[rules.program-allowlist]
+action = "hold"
+why = "Only these programs may run in a transaction this firewall signs off on."
+programs = [
+  "SPoo1Ku8WFXoNDMHPsrGSTSG1Y47rzgn41SLUNakuHy  spl stake pool",
+  "11111111111111111111111111111111             system",
+  "ComputeBudget111111111111111111111111111111  compute budget",
+  "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA  spl token",
+  "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL associated token account",
+  "Stake11111111111111111111111111111111111111  stake",
+]
+vetted = '2026-11-11 OK: quiet on legitimate activity, fired on drill case "deposit plus an unlisted program" [basis: 4 drill cases on Jito…Awbb; 8 watch rounds on 2 markets]'
+
+[rules.program-upgrade]
+action = "hold"
+sha256 = "ec2dfefaa70d560754a0000f39bd2cabc192b895d36205b3c428f601b6e1d7e1"
+why = "Pinned to the build deployed on 2026-11-11 (fork at slot 468136939). A redeploy holds everything until the rules are re-validated on the new bytes."
+vetted = "2026-11-11 QUIET: quiet on legitimate activity; nothing in this vet makes it fire, so its positive evidence must come from a drill with --candidate-so <other build> [basis: 4 drill cases on Jito…Awbb; 8 watch rounds on 2 markets]"
+
+[rules.must-simulate]
+action = "block"
+why = "A transaction that fails against current state is not signed."
+vetted = '2026-11-11 OK: quiet on legitimate activity, fired on drill case "deposit 1 SOL, minimum one token above quote" [basis: 4 drill cases on Jito…Awbb; 8 watch rounds on 2 markets]'
+
+[rules.failed-burst]
+action = "alert"
+window = 20
+max_failed = 15
+why = "Many failing transactions against one pool in a short window is what probing looks like."
+vetted = "2026-11-11 QUIET: quiet on legitimate activity; nothing in this vet makes it fire, so its positive evidence must come from observed probing traffic [basis: 4 drill cases on Jito…Awbb; 8 watch rounds on 2 markets]"

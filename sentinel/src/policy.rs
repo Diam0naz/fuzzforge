@@ -33,6 +33,8 @@ pub struct Basic {
     pub action: Action,
     pub why: String,
     pub evidence: Option<String>,
+    /// Written by `sentinel vet`: what drills and history measured.
+    pub vetted: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -42,6 +44,8 @@ pub struct Bps {
     pub max_bps: u64,
     pub why: String,
     pub evidence: Option<String>,
+    /// Written by `sentinel vet`: what drills and history measured.
+    pub vetted: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -51,6 +55,8 @@ pub struct Units {
     pub max_units: u64,
     pub why: String,
     pub evidence: Option<String>,
+    /// Written by `sentinel vet`: what drills and history measured.
+    pub vetted: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -60,6 +66,8 @@ pub struct Allowlist {
     pub programs: Vec<String>,
     pub why: String,
     pub evidence: Option<String>,
+    /// Written by `sentinel vet`: what drills and history measured.
+    pub vetted: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -70,6 +78,8 @@ pub struct Pin {
     pub sha256: String,
     pub why: String,
     pub evidence: Option<String>,
+    /// Written by `sentinel vet`: what drills and history measured.
+    pub vetted: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -82,6 +92,8 @@ pub struct Burst {
     pub max_failed: usize,
     pub why: String,
     pub evidence: Option<String>,
+    /// Written by `sentinel vet`: what drills and history measured.
+    pub vetted: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -103,13 +115,40 @@ pub struct Rules {
 pub struct Policy {
     pub name: String,
     pub version: u32,
+    /// Which adapter reads the protected program's accounts.
+    pub protocol: crate::protocol::Protocol,
     /// The program these rules protect.
     pub program: String,
     pub rules: Rules,
+    /// Who or what drafted the rules (a person, or an agent and its model).
+    pub drafted_by: Option<String>,
+    /// Added by `sentinel sign`; must stay the last table in the file.
+    pub signoff: Option<Signoff>,
     #[serde(skip)]
     pub sha256: String,
+    /// The sign-off's hash matches the file as it is now.
+    #[serde(skip)]
+    pub signoff_valid: bool,
     #[serde(skip)]
     pub allowed: Vec<Pubkey>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Signoff {
+    pub reviewer: String,
+    pub date: String,
+    /// SHA-256 of the file up to the `[signoff]` line.
+    pub rules_sha256: String,
+}
+
+/// SHA-256 of a policy file's text before its `[signoff]` table.
+pub fn content_sha256(text: &str) -> String {
+    let body = match text.find("\n[signoff]") {
+        Some(i) => &text[..i + 1],
+        None => text,
+    };
+    hex(&Sha256::digest(body.as_bytes()))
 }
 
 /// One rule firing.
@@ -129,6 +168,7 @@ impl Policy {
     pub fn parse(text: &str) -> Result<Self> {
         let mut policy: Policy = toml::from_str(text)?;
         policy.sha256 = hex(&Sha256::digest(text.as_bytes()));
+        policy.signoff_valid = policy.signoff.as_ref().is_some_and(|so| so.rules_sha256 == content_sha256(text));
         Pubkey::from_str(&policy.program).context("`program` is not a public key")?;
         if let Some(rule) = &policy.rules.program_allowlist {
             for p in &rule.programs {
@@ -144,34 +184,38 @@ impl Policy {
         Pubkey::from_str(&self.program).expect("validated at load")
     }
 
-    /// One line per rule, for `sentinel policy` and for review.
-    pub fn describe(&self) -> Vec<(&'static str, Action, String, &str, Option<&str>)> {
+    /// One entry per rule present, for review, vetting and signing.
+    pub fn describe(&self) -> Vec<RuleInfo<'_>> {
         let r = &self.rules;
         let mut out = Vec::new();
-        for (id, rule) in [("solvency", &r.solvency), ("share-value", &r.share_value), ("must-simulate", &r.must_simulate)] {
-            if let Some(b) = rule {
-                out.push((id, b.action, String::new(), b.why.as_str(), b.evidence.as_deref()));
-            }
+        macro_rules! info {
+            ($id:expr, $rule:expr, $param:expr) => {
+                if let Some(b) = $rule {
+                    out.push(RuleInfo { id: $id, action: b.action, param: $param(b), why: &b.why, evidence: b.evidence.as_deref(), vetted: b.vetted.as_deref() });
+                }
+            };
         }
-        for (id, rule) in [("reserve-outflow", &r.reserve_outflow), ("slippage-headroom", &r.slippage_headroom)] {
-            if let Some(b) = rule {
-                out.push((id, b.action, format!("max {} bps", b.max_bps), b.why.as_str(), b.evidence.as_deref()));
-            }
-        }
-        if let Some(b) = &r.program_allowlist {
-            out.push(("program-allowlist", b.action, format!("{} programs", b.programs.len()), b.why.as_str(), b.evidence.as_deref()));
-        }
-        if let Some(b) = &r.program_upgrade {
-            out.push(("program-upgrade", b.action, format!("sha256 {}…", &b.sha256[..b.sha256.len().min(12)]), b.why.as_str(), b.evidence.as_deref()));
-        }
-        if let Some(b) = &r.compute_budget {
-            out.push(("compute-budget", b.action, format!("max {} units", b.max_units), b.why.as_str(), b.evidence.as_deref()));
-        }
-        if let Some(b) = &r.failed_burst {
-            out.push(("failed-burst", b.action, format!("more than {} of last {}", b.max_failed, b.window), b.why.as_str(), b.evidence.as_deref()));
-        }
+        let none = |_: &Basic| String::new();
+        info!("solvency", &r.solvency, none);
+        info!("share-value", &r.share_value, none);
+        info!("must-simulate", &r.must_simulate, none);
+        info!("reserve-outflow", &r.reserve_outflow, |b: &Bps| format!("max {} bps", b.max_bps));
+        info!("slippage-headroom", &r.slippage_headroom, |b: &Bps| format!("max {} bps", b.max_bps));
+        info!("program-allowlist", &r.program_allowlist, |b: &Allowlist| format!("{} programs", b.programs.len()));
+        info!("program-upgrade", &r.program_upgrade, |b: &Pin| format!("sha256 {}…", &b.sha256[..b.sha256.len().min(12)]));
+        info!("compute-budget", &r.compute_budget, |b: &Units| format!("max {} units", b.max_units));
+        info!("failed-burst", &r.failed_burst, |b: &Burst| format!("more than {} of last {}", b.max_failed, b.window));
         out
     }
+}
+
+pub struct RuleInfo<'a> {
+    pub id: &'static str,
+    pub action: Action,
+    pub param: String,
+    pub why: &'a str,
+    pub evidence: Option<&'a str>,
+    pub vetted: Option<&'a str>,
 }
 
 /// The decision a set of findings adds up to: the most severe action wins.

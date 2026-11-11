@@ -1,14 +1,13 @@
 //! Rule evaluation. Each function applies one policy rule and pushes a
 //! [`Finding`] when it fires; rules missing from the policy are skipped.
 //!
-//! The predicates are the ones the fuzz campaigns asserted:
-//! `fuzzforge_scenarios::invariants::{solvency, share_value_fell}` are called
-//! here unchanged, and the slippage rule measures on the user's own token
+//! The predicates are the ones the fuzz campaigns asserted: the protocol
+//! adapters call `fuzzforge_scenarios::invariants` unchanged, and the slippage rule measures on the user's own token
 //! accounts exactly as the CP-Swap harness does.
 
-use crate::cpswap::{Call, Event, PoolView};
+use crate::cpswap::{Call, Event};
+use crate::protocol::{Protocol, Snapshot};
 use crate::policy::{Finding, Policy};
-use fuzzforge_scenarios::invariants::{share_value_fell, solvency};
 use solana_pubkey::Pubkey;
 
 pub type Findings = Vec<Finding>;
@@ -21,30 +20,31 @@ pub fn bps(removed: u64, before: u64) -> u64 {
     (removed as u128 * 10_000 / before as u128) as u64
 }
 
-/// Solvency of `post`, plus share value and reserve outflow from `pre` to
-/// `post` when the earlier state is known.
-pub fn pool_transition(policy: &Policy, label: &str, pre: Option<PoolView>, post: PoolView, out: &mut Findings) {
+/// Accounting problems in `post` (rule `solvency`), plus value per share and
+/// reserve outflow from `pre` to `post` when the earlier state is known.
+pub fn transition(policy: &Policy, protocol: Protocol, label: &str, pre: Option<&Snapshot>, post: &Snapshot, out: &mut Findings) {
     let r = &policy.rules;
     if let Some(rule) = &r.solvency {
-        if let Some(msg) = solvency(label, (post.vault0, post.vault1), (post.fees0, post.fees1)) {
-            out.push(Finding { rule: "solvency", action: rule.action, detail: msg });
+        for msg in &post.problems {
+            out.push(Finding { rule: "solvency", action: rule.action, detail: msg.clone() });
         }
     }
     let Some(pre) = pre else { return };
+    if pre.reserves.len() != post.reserves.len() {
+        return;
+    }
     if let Some(rule) = &r.share_value {
-        if share_value_fell(pre.state(), post.state()) {
-            let ((a, b, c), (x, y, z)) = (pre.state(), post.state());
+        if protocol.value_fell(pre, post) {
             out.push(Finding {
                 rule: "share-value",
                 action: rule.action,
-                detail: format!("{label}: LP share value fell: reserves ({a}, {b}) / lp {c} -> ({x}, {y}) / lp {z}"),
+                detail: format!("{label}: value per share fell: reserves {:?} / shares {} -> {:?} / shares {}", pre.reserves, pre.shares, post.reserves, post.shares),
             });
         }
     }
     if let Some(rule) = &r.reserve_outflow {
-        let ((a, b), (x, y)) = (pre.reserves(), post.reserves());
-        for (side, before, after) in [(0, a, x), (1, b, y)] {
-            let moved = bps(before.saturating_sub(after), before);
+        for (side, (before, after)) in pre.reserves.iter().zip(&post.reserves).enumerate() {
+            let moved = bps(before.saturating_sub(*after), *before);
             if moved > rule.max_bps {
                 out.push(Finding {
                     rule: "reserve-outflow",

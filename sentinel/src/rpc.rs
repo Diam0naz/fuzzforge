@@ -145,3 +145,114 @@ fn decode_account(v: &Value) -> Result<Account> {
         rent_epoch: 0,
     })
 }
+
+/// One account's balance of one asset before and after a transaction.
+#[derive(Clone, Debug)]
+pub struct Balance {
+    /// The wallet: the token account's owner, or the account itself for SOL.
+    pub owner: String,
+    /// Mint address, or "SOL".
+    pub asset: String,
+    pub decimals: u8,
+    pub pre: u128,
+    pub post: u128,
+}
+
+/// Balances a transaction moved, from `getTransaction` metadata.
+#[derive(Clone, Debug)]
+pub struct TxBalances {
+    pub signature: String,
+    pub slot: u64,
+    pub block_time: Option<i64>,
+    pub failed: bool,
+    pub balances: Vec<Balance>,
+}
+
+impl TxBalances {
+    pub fn from_json(signature: &str, r: &Value) -> Result<Self> {
+        let meta = &r["meta"];
+        let mut keys: Vec<String> = r["transaction"]["message"]["accountKeys"]
+            .as_array()
+            .ok_or_else(|| anyhow!("{signature}: no account keys"))?
+            .iter()
+            .map(|k| k.as_str().unwrap_or("").to_string())
+            .collect();
+        for part in ["writable", "readonly"] {
+            if let Some(a) = meta["loadedAddresses"][part].as_array() {
+                keys.extend(a.iter().map(|k| k.as_str().unwrap_or("").to_string()));
+            }
+        }
+        let lamports = |field: &str| -> Vec<u128> { meta[field].as_array().map(|a| a.iter().map(|v| v.as_u64().unwrap_or(0) as u128).collect()).unwrap_or_default() };
+        let (pre, post) = (lamports("preBalances"), lamports("postBalances"));
+        let fee = meta["fee"].as_u64().unwrap_or(0) as u128;
+        let mut balances = Vec::new();
+        for (i, key) in keys.iter().enumerate() {
+            let (Some(a), Some(b)) = (pre.get(i), post.get(i)) else { continue };
+            // The fee is burnt, not sent anywhere: add it back to the payer.
+            let b = if i == 0 { b + fee } else { *b };
+            if *a != b {
+                balances.push(Balance { owner: key.clone(), asset: "SOL".into(), decimals: 9, pre: *a, post: b });
+            }
+        }
+        let tokens = |field: &str| -> Vec<(u64, String, String, u8, u128)> {
+            meta[field]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .map(|t| {
+                            (
+                                t["accountIndex"].as_u64().unwrap_or(u64::MAX),
+                                t["mint"].as_str().unwrap_or("").to_string(),
+                                t["owner"].as_str().unwrap_or("").to_string(),
+                                t["uiTokenAmount"]["decimals"].as_u64().unwrap_or(0) as u8,
+                                t["uiTokenAmount"]["amount"].as_str().and_then(|x| x.parse().ok()).unwrap_or(0),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let (tpre, tpost) = (tokens("preTokenBalances"), tokens("postTokenBalances"));
+        let mut idx: Vec<u64> = tpre.iter().chain(&tpost).map(|t| t.0).collect();
+        idx.sort();
+        idx.dedup();
+        for i in idx {
+            let a = tpre.iter().find(|t| t.0 == i);
+            let b = tpost.iter().find(|t| t.0 == i);
+            let any = a.or(b).unwrap();
+            let (pa, pb) = (a.map(|t| t.4).unwrap_or(0), b.map(|t| t.4).unwrap_or(0));
+            if pa != pb {
+                balances.push(Balance { owner: any.2.clone(), asset: any.1.clone(), decimals: any.3, pre: pa, post: pb });
+            }
+        }
+        Ok(Self { signature: signature.into(), slot: r["slot"].as_u64().unwrap_or(0), block_time: r["blockTime"].as_i64(), failed: !meta["err"].is_null(), balances })
+    }
+}
+
+impl Rpc {
+    pub fn balances(&self, signature: &str) -> Result<Option<TxBalances>> {
+        let r = self.call("getTransaction", json!([signature, {"encoding": "json", "commitment": "confirmed", "maxSupportedTransactionVersion": 1}]))?;
+        if r.is_null() {
+            return Ok(None);
+        }
+        TxBalances::from_json(signature, &r).map(Some)
+    }
+
+    /// Token accounts `owner` holds of `mint`, with raw amounts.
+    pub fn token_holdings(&self, owner: &str, mint: &str) -> Result<Vec<(String, u128)>> {
+        let r = self.call("getTokenAccountsByOwner", json!([owner, {"mint": mint}, {"encoding": "jsonParsed", "commitment": "confirmed"}]))?;
+        Ok(r["value"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|v| {
+                        (
+                            v["pubkey"].as_str().unwrap_or("").to_string(),
+                            v["account"]["data"]["parsed"]["info"]["tokenAmount"]["amount"].as_str().and_then(|x| x.parse().ok()).unwrap_or(0),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+}

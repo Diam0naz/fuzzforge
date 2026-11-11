@@ -69,6 +69,57 @@ enum Cmd {
         #[arg(long)]
         candidate_so: Option<String>,
     },
+    /// Incident response: follow funds out of one transaction, hop by hop.
+    Trace {
+        #[arg(long)]
+        signature: String,
+        /// Wallet that lost funds (repeatable). Default: every wallet whose balance fell.
+        #[arg(long = "from")]
+        victims: Vec<String>,
+        #[arg(long, default_value_t = 2)]
+        hops: usize,
+        #[arg(long, default_value_t = 20)]
+        max_tx: usize,
+        #[arg(long, default_value_t = 40)]
+        max_nodes: usize,
+        #[arg(long, default_value_t = 10_000_000)]
+        min_lamports: u128,
+        /// TOML table of `address = "label"`; labelled addresses are named and not followed.
+        #[arg(long)]
+        labels: Option<String>,
+        /// Write the Markdown incident report here (JSON goes to stdout).
+        #[arg(long)]
+        report: Option<String>,
+    },
+    /// Measure every rule of a draft policy against drills and live history;
+    /// writes the policy back with `vetted` lines. Exit 1 if any rule is rejected.
+    Vet {
+        #[arg(long)]
+        policy: String,
+        #[arg(long = "pool", required = true)]
+        pools: Vec<Pubkey>,
+        #[arg(long, default_value_t = 10)]
+        rounds: u64,
+        #[arg(long, default_value_t = 15)]
+        interval: u64,
+        #[arg(long, default_value_t = 300)]
+        backtest: usize,
+        /// Another build of the program, to drill the upgrade pin (CP-Swap).
+        #[arg(long)]
+        candidate_so: Option<String>,
+        /// Where to write the vetted policy (default: overwrite --policy).
+        #[arg(long)]
+        out: Option<String>,
+    },
+    /// Record a reviewer's sign-off on a vetted policy.
+    Sign {
+        #[arg(long)]
+        policy: String,
+        #[arg(long)]
+        reviewer: String,
+        #[arg(long)]
+        accept_untested: bool,
+    },
     /// Run the history-based rules over a pool's recent transactions.
     Backtest {
         #[arg(long)]
@@ -126,10 +177,22 @@ fn main() -> Result<()> {
     let code = match cli.cmd {
         Cmd::Policy { file } => {
             let p = Policy::load(&file)?;
-            println!("{} v{}  program {}\nsha256 {}\n", p.name, p.version, p.program, p.sha256);
-            for (id, action, param, why, evidence) in p.describe() {
-                println!("{id:<18} {:<6} {param}\n    why: {why}", format!("{action:?}").to_lowercase());
-                println!("    evidence: {}", evidence.unwrap_or("NONE: not yet validated"));
+            println!("{} v{}  {}  program {}\nsha256 {}", p.name, p.version, p.protocol.name(), p.program, p.sha256);
+            if let Some(d) = &p.drafted_by {
+                println!("drafted by {d}");
+            }
+            match &p.signoff {
+                Some(so) if p.signoff_valid => println!("signed off by {} on {}", so.reviewer, so.date),
+                Some(so) => println!("STALE SIGN-OFF by {} on {}: the file changed after it was signed", so.reviewer, so.date),
+                None => println!("not signed off"),
+            }
+            println!();
+            for r in p.describe() {
+                println!("{:<18} {:<6} {}\n    why: {}", r.id, format!("{:?}", r.action).to_lowercase(), r.param, r.why);
+                println!("    evidence: {}", r.evidence.unwrap_or("NONE: not yet validated"));
+                if let Some(v) = r.vetted {
+                    println!("    vetted: {v}");
+                }
             }
             0
         }
@@ -171,8 +234,42 @@ fn main() -> Result<()> {
                     println!("       {} [{:?}] {}", f.rule, f.action, f.detail);
                 }
             }
-            println!("{} of {} cases matched; policy sha256 {}", cases.len() as i32 - failed, cases.len(), p.sha256);
+            let deployed = cases.iter().find_map(|c| c.decision.program_sha256.clone()).unwrap_or_default();
+            println!("{} of {} cases matched; policy sha256 {}; program sha256 in fork {}", cases.len() as i32 - failed, cases.len(), p.sha256, deployed);
             (failed > 0) as i32
+        }
+        Cmd::Trace { signature, victims, hops, max_tx, max_nodes, min_lamports, labels, report } => {
+            let labels: std::collections::HashMap<String, String> = match labels {
+                Some(path) => toml::from_str(&std::fs::read_to_string(&path).with_context(|| format!("reading {path}"))?)?,
+                None => Default::default(),
+            };
+            let args = fuzzforge_sentinel::trace::TraceArgs { signature, victims, hops, max_tx_per_wallet: max_tx, max_nodes, min_lamports, labels };
+            let t = fuzzforge_sentinel::trace::trace(&rpc, &args)?;
+            if let Some(path) = report {
+                std::fs::write(&path, fuzzforge_sentinel::trace::report(&t))?;
+                eprintln!("[trace] report written to {path}");
+            }
+            println!("{}", serde_json::to_string_pretty(&t)?);
+            0
+        }
+        Cmd::Vet { policy, pools, rounds, interval, backtest, candidate_so, out } => {
+            let args = fuzzforge_sentinel::vet::VetArgs { pools: &pools, rounds, interval_secs: interval, backtest_limit: backtest, candidate_so: candidate_so.as_deref() };
+            let (verdicts, text) = fuzzforge_sentinel::vet::vet(&rpc, &policy, &args)?;
+            let target = out.unwrap_or(policy);
+            std::fs::write(&target, &text)?;
+            let mut rejected = 0;
+            for v in &verdicts {
+                rejected += (v.verdict == "REJECT") as i32;
+                println!("{:<8} {:<18} {}", v.verdict, v.rule, v.detail);
+            }
+            println!("wrote {target}");
+            (rejected > 0) as i32
+        }
+        Cmd::Sign { policy, reviewer, accept_untested } => {
+            let signed = fuzzforge_sentinel::vet::sign(&policy, &reviewer, accept_untested)?;
+            std::fs::write(&policy, signed)?;
+            println!("signed {policy} as {reviewer}");
+            0
         }
         Cmd::Backtest { policy, pool, limit } => {
             let p = Policy::load(&policy)?;

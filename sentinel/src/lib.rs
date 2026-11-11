@@ -10,8 +10,12 @@ pub mod drill;
 pub mod fork;
 pub mod monitor;
 pub mod policy;
+pub mod protocol;
 pub mod rpc;
 pub mod rules;
+pub mod stakepool;
+pub mod trace;
+pub mod vet;
 
 #[cfg(test)]
 mod tests;
