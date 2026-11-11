@@ -1,15 +1,14 @@
 //! Orca Whirlpools × Token-2022 mint matrix, and the Pinocchio port against
-//! the Anchor original.
+//! the Anchor code it replaced.
 //!
-//! The deployed program routes six liquidity instructions (increase and
-//! decrease, v1 and v2, increase by token amounts, reposition) to hand-written
-//! Pinocchio ports; everything else still runs through Anchor. The Anchor
-//! implementations of those six are still in the source. Upgrade-diff mode runs
-//! every fuzzed step against both, so any difference in outcome or resulting
-//! state is a behaviour change in the port:
+//! Commit 822f213 moved increase/decrease liquidity (v1 and v2) to
+//! hand-written Pinocchio handlers and stubbed out the Anchor ones. Upgrade-diff
+//! mode runs every fuzzed step against the port and against the commit just
+//! before it, so any difference in outcome or resulting state is a behaviour
+//! change in that commit:
 //!
-//!   FF_PROGRAM_SO=program/reference/whirlpool_pinocchio.so \
-//!   FF_DIFF_SO=program/reference/whirlpool_anchor_only.so \
+//!   FF_PROGRAM_SO=program/reference/whirlpool_822f213.so \
+//!   FF_DIFF_SO=program/reference/whirlpool_71569ae.so \
 //!     crucible run -C targets/orca_whirlpools orca_whirlpools whirlpool_invariants --release --timeout 900
 //!
 //! See program/SOURCE.md for how the two reference builds are made.

@@ -17,46 +17,46 @@ The dump taken on 2026-11-11 has sha256
 
 ## Pinocchio port against the Anchor original (upgrade-diff)
 
-The deployed program sends six liquidity instructions to hand-written
-Pinocchio ports (`programs/whirlpool/src/entrypoint.rs`). The Anchor versions
-of the same six are still in the source. Two builds of one commit isolate
-the port:
+Commit `822f213` ("Pinocchio Base and Liquidity Ops", 2026-01-30) moved
+`increase_liquidity`, `decrease_liquidity` and their v2 variants to
+hand-written Pinocchio handlers. Their Anchor handlers became
+`unreachable!()` stubs, so a build of a later commit cannot run the Anchor
+versions. (An earlier attempt here patched the routing table at HEAD; that
+only sends those calls into the stubs, which panic. Do not use
+`whirlpool_anchor_only.so` from that attempt.)
 
-- `whirlpool_pinocchio.so`: the source as is.
-- `whirlpool_anchor_only.so`: the same source with `anchor-only.patch`
-  applied. It empties the routing table, so every instruction runs through
-  Anchor; nothing else changes.
+The reference is the commit just before the port:
 
-Source: [orca-so/whirlpools](https://github.com/orca-so/whirlpools) at
-`cc683ec92acb5e7606caa3d8e514d9383e9c7c11`.
+- `whirlpool_71569ae.so`: the last Anchor implementation (2026-01-27).
+- `whirlpool_822f213.so`: the port.
 
 ```sh
-cd ~/src/targets/whirlpools/programs/whirlpool
+cd ~/src/targets/whirlpools
+git fetch --deepen=400 origin        # the clone is shallow
 OUT=~/Documents/Solana_Bootcamp/fuzzforge/targets/orca_whirlpools/program/reference
-mkdir -p "$OUT"
-
-cargo build-sbf --tools-version v1.58 --features mainnet
-cp ../../target/deploy/whirlpool.so "$OUT/whirlpool_pinocchio.so"
-
-git apply "$OUT/../anchor-only.patch"
-cargo build-sbf --tools-version v1.58 --features mainnet
-cp ../../target/deploy/whirlpool.so "$OUT/whirlpool_anchor_only.so"
-git checkout src/entrypoint.rs
-
-sha256sum "$OUT"/*.so
+for c in 71569ae 822f213; do
+  git worktree add -f ../whirlpools-$c $c
+  (cd ../whirlpools-$c/programs/whirlpool && cargo build-sbf --tools-version v1.58 --features mainnet) \
+    && cp ../whirlpools-$c/target/deploy/whirlpool.so "$OUT/whirlpool_$c.so"
+done
+sha256sum "$OUT"/whirlpool_71569ae.so "$OUT"/whirlpool_822f213.so
 ```
 
 Then, from `targets/orca_whirlpools`:
 
 ```sh
-FF_PROGRAM_SO=program/reference/whirlpool_pinocchio.so \
-FF_DIFF_SO=program/reference/whirlpool_anchor_only.so \
+FF_PROGRAM_SO=program/reference/whirlpool_822f213.so \
+FF_DIFF_SO=program/reference/whirlpool_71569ae.so \
   crucible run -C . orca_whirlpools whirlpool_invariants --release --cores 4 --timeout 900
 ```
 
-Any `[upgrade-diff]` line is a case where the Pinocchio port and the Anchor
-original disagree on an instruction's outcome or on resulting account
-bytes. Each one is either an intended change or a bug in the port. If it is
-a bug, it goes to Orca's bug bounty on Immunefi
-(https://immunefi.com/bug-bounty/orca, per the repository's SECURITY.md) and
-stays private.
+`reposition_liquidity_v2` and `increase_liquidity_by_token_amounts_v2`
+arrived after the port and exist in neither build, so both builds reject
+them alike. The diff covers the four ported instructions plus everything
+else that changed in `822f213`.
+
+Any `[upgrade-diff]` line is a case where the two builds disagree on an
+instruction's outcome or on resulting account bytes. Each one is either an
+intended change in that commit or a bug in the port. If it is a bug, it
+goes to Orca's bug bounty on Immunefi (https://immunefi.com/bug-bounty/orca,
+per the repository's SECURITY.md) and stays private.
