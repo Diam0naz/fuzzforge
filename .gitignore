@@ -29,3 +29,6 @@ opencode.json
 *.tsbuildinfo
 skills-lock.json
 .vercel/
+
+# Confidential client engagement: kept local, never pushed to this public repo.
+targets/attention_fi/
