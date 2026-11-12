@@ -61,6 +61,20 @@ const ARRAY_SPAN: i32 = 88 * TICK_SPACING as i32;
 const ARRAY_STARTS: [i32; 5] = [-2 * ARRAY_SPAN, -ARRAY_SPAN, 0, ARRAY_SPAN, 2 * ARRAY_SPAN];
 const LOWEST_TICK: i32 = -2 * ARRAY_SPAN;
 const HIGHEST_TICK: i32 = 3 * ARRAY_SPAN; // exclusive
+// Extreme-price tick arrays, initialised only when FF_EDGE is set. Starts are
+// multiples of ARRAY_SPAN (88*64) so they are valid array starts. The low
+// start sits below MIN_TICK (-443636); the program allows a left-edge array
+// there. Usable ticks stay multiples of 64 inside [MIN_USABLE, MAX_USABLE].
+const EDGE_LO_START: i32 = -79 * ARRAY_SPAN; // -444928, covers [-444928, -439296)
+const EDGE_HI_START: i32 = 78 * ARRAY_SPAN; //  439296, covers [ 439296,  444928)
+const MIN_USABLE_TICK: i32 = -443584; // -6931 * 64, >= MIN_TICK
+const MAX_USABLE_TICK: i32 = 443584; //   6931 * 64, <= MAX_TICK
+const LO_HI_TICK: i32 = EDGE_LO_START + ARRAY_SPAN - 64; // -439360, top of low array
+const HI_LO_TICK: i32 = EDGE_HI_START; // 439296, bottom of high array
+
+fn edge_enabled() -> bool {
+    std::env::var("FF_EDGE").is_ok()
+}
 const FEE_RATE: u16 = 3_000; // 0.3%, hundredths of a basis point
 const PROTOCOL_FEE_RATE: u16 = 1_300; // 13% of fees, basis points
 const SQRT_PRICE_ONE: u128 = 1 << 64;
@@ -574,6 +588,22 @@ impl Fixture {
         (lower >= LOWEST_TICK && upper < HIGHEST_TICK).then_some((lower, upper))
     }
 
+    /// A position wholly inside one extreme-price tick array (FF_EDGE). Both
+    /// ticks are multiples of 64 within one initialised edge array, so the
+    /// liquidity maths runs at near-min or near-max sqrt price.
+    fn ticks_in_edge(high: bool, offset: u64, width: u64) -> Option<(i32, i32)> {
+        let w = (width.max(1) as i32) * TICK_SPACING as i32;
+        let off = (offset as i32) * TICK_SPACING as i32;
+        let (lower, upper) = if high {
+            let lower = (HI_LO_TICK + off).min(MAX_USABLE_TICK - TICK_SPACING as i32);
+            (lower, (lower + w).min(MAX_USABLE_TICK))
+        } else {
+            let upper = (LO_HI_TICK - off).max(MIN_USABLE_TICK + TICK_SPACING as i32);
+            ((upper - w).max(MIN_USABLE_TICK), upper)
+        };
+        (lower < upper).then_some((lower, upper))
+    }
+
     // ---- world -----------------------------------------------------------
 
     fn build(so: &str, announce: bool) -> Self {
@@ -743,7 +773,12 @@ impl Fixture {
         if !full {
             return Ok(pool);
         }
-        for start in ARRAY_STARTS {
+        let mut starts = ARRAY_STARTS.to_vec();
+        if edge_enabled() {
+            starts.push(EDGE_LO_START);
+            starts.push(EDGE_HI_START);
+        }
+        for start in starts {
             let ix = AnchorIx::new(PROGRAM_ID, "initialize_tick_array")
                 .i32(start)
                 .readonly(state)
@@ -869,6 +904,16 @@ impl Fixture {
     pub fn action_open_position(&mut self, #[range(0..8)] p: usize, #[range(0..2)] u: usize, #[range(0..264)] lower_slot: u64, #[range(1..200)] width: u64) -> bool {
         let p = p % NP;
         let Some((lower, upper)) = Self::ticks(lower_slot, width) else { return false };
+        self.pools[p].live && self.open_position(p, u % NU, lower, upper)
+    }
+
+    /// Open a position pinned to a near-min or near-max price (FF_EDGE only).
+    pub fn action_open_edge_position(&mut self, #[range(0..8)] p: usize, #[range(0..2)] u: usize, high: bool, #[range(0..67)] offset: u64, #[range(1..66)] width: u64) -> bool {
+        if !edge_enabled() {
+            return false;
+        }
+        let p = p % NP;
+        let Some((lower, upper)) = Self::ticks_in_edge(high, offset, width) else { return false };
         self.pools[p].live && self.open_position(p, u % NU, lower, upper)
     }
 
