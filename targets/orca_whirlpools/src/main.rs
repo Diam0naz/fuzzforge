@@ -116,7 +116,6 @@ const POOLS: [(MintProfile, MintProfile); 8] = [
     (PermanentDelegate, TransferFee),
     (TransferFeeCapped, SplToken),
 ];
-const NP: usize = POOLS.len();
 const NU: usize = 2;
 
 fn needs_badge(p: MintProfile) -> bool {
@@ -178,6 +177,10 @@ struct Fixture {
 
 fn pda(seeds: &[&[u8]]) -> Pubkey {
     Pubkey::find_program_address(seeds, &PROGRAM_ID).0
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn tick_array(pool: &Pubkey, start: i32) -> Pubkey {
@@ -329,40 +332,61 @@ impl Fixture {
 
     // ---- instruction builders -------------------------------------------
 
-    /// For a v2 instruction on `pool`, the Borsh-encoded `remaining_accounts_info`
-    /// and the hook accounts to append. A non-hook pool gets `Option::None`
-    /// (one byte) and no accounts. A hooked side adds a `TransferHookA` (0) or
-    /// `TransferHookB` (1) slice of three accounts: validation, counter, program.
-    fn hook_ra(&self, pool: &Pool) -> (Vec<u8>, Vec<AccountMeta>) {
-        let a = pool.ma.profile == MintProfile::TransferHookActive;
-        let b = pool.mb.profile == MintProfile::TransferHookActive;
-        if !a && !b {
-            return (vec![0], Vec::new());
+    /// The side (0 = `TransferHookA`, 1 = `TransferHookB`) of this pool whose
+    /// mint has an active transfer hook, if any. (Our matrix hooks at most one
+    /// side; a both-hooked pool would need two slices.)
+    fn hooked_side(pool: &Pool) -> Option<u8> {
+        if pool.ma.profile == MintProfile::TransferHookActive {
+            Some(0)
+        } else if pool.mb.profile == MintProfile::TransferHookActive {
+            Some(1)
+        } else {
+            None
         }
-        let mut slices: Vec<(u8, u8)> = Vec::new();
-        let mut metas: Vec<AccountMeta> = Vec::new();
-        if a {
-            slices.push((0, 3));
-            metas.extend(hook::remaining_accounts(&pool.ma.mint));
-        }
-        if b {
-            slices.push((1, 3));
-            metas.extend(hook::remaining_accounts(&pool.mb.mint));
-        }
+    }
+
+    /// `remaining_accounts_info` (one byte `Option::None`) and no accounts, for
+    /// a non-hook transfer.
+    fn hook_none() -> (Vec<u8>, Vec<AccountMeta>) {
+        (vec![0], Vec::new())
+    }
+
+    /// `remaining_accounts_info` with one `TransferHook<side>` slice of four
+    /// accounts, and those accounts, for one hooked transfer. `source`, `dest`
+    /// and `owner` are that transfer's own accounts, since the hook's verify PDA
+    /// is derived from them.
+    fn hook_ra_one(side: u8, mint: &Pubkey, source: &Pubkey, dest: &Pubkey, owner: &Pubkey) -> (Vec<u8>, Vec<AccountMeta>) {
         let mut data = vec![1u8]; // Option::Some
-        data.extend_from_slice(&(slices.len() as u32).to_le_bytes());
-        for (t, l) in slices {
-            data.push(t);
-            data.push(l);
+        data.extend_from_slice(&1u32.to_le_bytes()); // one slice
+        data.push(side);
+        data.push(4); // validation, counter, verify, program
+        (data, hook::remaining_accounts(mint, source, dest, owner).to_vec())
+    }
+
+    /// Hook accounts for a liquidity transfer on `pool` by `owner_idx`.
+    /// `deposit` is owner→vault; otherwise vault→owner (the whirlpool signs).
+    fn hook_ra_liquidity(&self, pool: &Pool, owner_idx: usize, deposit: bool) -> (Vec<u8>, Vec<AccountMeta>) {
+        let Some(side) = Self::hooked_side(pool) else { return Self::hook_none() };
+        let (mint, ut, vault) = self.side_accounts(pool, side, owner_idx);
+        let user = self.users[owner_idx].pubkey();
+        let (source, dest, owner) = if deposit { (ut, vault, user) } else { (vault, ut, pool.state) };
+        Self::hook_ra_one(side, &mint, &source, &dest, &owner)
+    }
+
+    /// `(mint, user token account, vault)` for one side of a pool.
+    fn side_accounts(&self, pool: &Pool, side: u8, owner_idx: usize) -> (Pubkey, Pubkey, Pubkey) {
+        if side == 0 {
+            (pool.ma.mint, pool.user_a[owner_idx], pool.vault_a)
+        } else {
+            (pool.mb.mint, pool.user_b[owner_idx], pool.vault_b)
         }
-        (data, metas)
     }
 
     fn liquidity_ix(&self, p: usize, k: usize, method: Method, increase: bool, liquidity: u128, limit_a: u64, limit_b: u64) -> Instruction {
         let pool = &self.pools[p];
         let pos = &pool.positions[k];
         let user = self.users[pos.owner].pubkey();
-        let (ra, metas) = self.hook_ra(pool);
+        let (ra, metas) = self.hook_ra_liquidity(pool, pos.owner, increase);
         let (lower, upper) = (tick_array(&pool.state, array_start(pos.lower)), tick_array(&pool.state, array_start(pos.upper)));
         let b = match (method, increase) {
             (Method::V1, true) => AnchorIx::new(PROGRAM_ID, "increase_liquidity").u128(liquidity).u64(limit_a).u64(limit_b),
@@ -426,7 +450,13 @@ impl Fixture {
     fn collect_fees_ix(&self, p: usize, k: usize) -> Instruction {
         let pool = &self.pools[p];
         let pos = &pool.positions[k];
-        let (ra, metas) = self.hook_ra(pool);
+        let (ra, metas) = match Self::hooked_side(pool) {
+            None => Self::hook_none(),
+            Some(side) => {
+                let (mint, ut, vault) = self.side_accounts(pool, side, pos.owner);
+                Self::hook_ra_one(side, &mint, &vault, &ut, &pool.state)
+            }
+        };
         AnchorIx::new(PROGRAM_ID, "collect_fees_v2")
             .raw(&ra)
             .readonly(pool.state)
@@ -448,7 +478,13 @@ impl Fixture {
 
     fn collect_protocol_fees_ix(&self, p: usize) -> Instruction {
         let pool = &self.pools[p];
-        let (ra, metas) = self.hook_ra(pool);
+        let (ra, metas) = match Self::hooked_side(pool) {
+            None => Self::hook_none(),
+            Some(side) => {
+                let (mint, vault, dest) = if side == 0 { (pool.ma.mint, pool.vault_a, pool.fees_to_a) } else { (pool.mb.mint, pool.vault_b, pool.fees_to_b) };
+                Self::hook_ra_one(side, &mint, &vault, &dest, &pool.state)
+            }
+        };
         AnchorIx::new(PROGRAM_ID, "collect_protocol_fees_v2")
             .raw(&ra)
             .readonly(self.config)
@@ -473,7 +509,17 @@ impl Fixture {
         let s0 = array_start(v.tick);
         let step = if a_to_b { -ARRAY_SPAN } else { ARRAY_SPAN };
         let arrays = [s0, s0 + step, s0 + 2 * step].map(|s| tick_array(&pool.state, s));
-        let (ra, metas) = self.hook_ra(pool);
+        let (ra, metas) = match Self::hooked_side(pool) {
+            None => Self::hook_none(),
+            Some(side) => {
+                let (mint, ut, vault) = self.side_accounts(pool, side, u);
+                // a_to_b: side A (0) is the input; otherwise side B (1) is.
+                let is_input = (side == 0) == a_to_b;
+                let user = self.users[u].pubkey();
+                let (source, dest, owner) = if is_input { (ut, vault, user) } else { (vault, ut, pool.state) };
+                Self::hook_ra_one(side, &mint, &source, &dest, &owner)
+            }
+        };
         Some(
             AnchorIx::new(PROGRAM_ID, "swap_v2")
                 .u64(amount)
@@ -600,6 +646,14 @@ impl Fixture {
     fn exit_check(&self, p: usize) -> Option<String> {
         let pool = &self.pools[p];
         if !pool.live {
+            return None;
+        }
+        // A transfer hook may legitimately cap or block transfers (Orca's
+        // counter hook rejects amounts over ~1e12), so "every LP can always
+        // withdraw in full" is not a Whirlpools invariant for hook pools; the
+        // program correctly reverts the whole transaction. Solvency, slippage,
+        // round-trip and upgrade-diff still apply to these pools.
+        if pool.has_hook() {
             return None;
         }
         let mut scratch = self.ctx.clone();
@@ -751,8 +805,22 @@ impl Fixture {
                 }
             }
         }
+        // Transfer-hook pool (opt-in): needs the counter-hook fixture loaded.
+        if hook_fixture_enabled() {
+            let p = f.pools.len();
+            match f.create_pool(&format!("pool-{p}"), TransferHookActive, SplToken, true, true) {
+                Ok(mut pool) => {
+                    pool.label = format!("pool{p}[{} / {}]", pool.ma.profile.name(), pool.mb.profile.name());
+                    f.pools.push(pool);
+                }
+                Err(e) => {
+                    println!("[FF_PREFLIGHT] [setup] hook pool failed: {e}");
+                    panic!("hook pool setup failed");
+                }
+            }
+        }
         // Seed liquidity: user 0 opens a wide position in every pool.
-        for p in 0..NP {
+        for p in 0..f.pools.len() {
             if f.open_position(p, 0, -ARRAY_SPAN, 2 * ARRAY_SPAN) {
                 let ok = f.change_liquidity(p, 0, Method::V2, true, 1_000_000_000_000, 0, false, (0, 0));
                 if !ok && announce {
@@ -955,7 +1023,7 @@ impl Fixture {
             println!("[FF_PREFLIGHT] [upgrade-diff] candidate {so}, reference {reference_so}");
             let g = Self::build(&reference_so, false);
             f.reference = Some(g.ctx);
-            for p in 0..NP {
+            for p in 0..f.pools.len() {
                 if let Some(reason) = f.pool_difference(p) {
                     println!("[FF_PREFLIGHT] [upgrade-diff] {} excluded: differs straight after setup: {reason}", f.pools[p].label);
                     f.pools[p].live = false;
@@ -965,24 +1033,24 @@ impl Fixture {
         f
     }
 
-    pub fn action_open_position(&mut self, #[range(0..8)] p: usize, #[range(0..2)] u: usize, #[range(0..264)] lower_slot: u64, #[range(1..200)] width: u64) -> bool {
-        let p = p % NP;
+    pub fn action_open_position(&mut self, #[range(0..9)] p: usize, #[range(0..2)] u: usize, #[range(0..264)] lower_slot: u64, #[range(1..200)] width: u64) -> bool {
+        let p = p % self.pools.len();
         let Some((lower, upper)) = Self::ticks(lower_slot, width) else { return false };
         self.pools[p].live && self.open_position(p, u % NU, lower, upper)
     }
 
     /// Open a position pinned to a near-min or near-max price (FF_EDGE only).
-    pub fn action_open_edge_position(&mut self, #[range(0..8)] p: usize, #[range(0..2)] u: usize, high: bool, #[range(0..67)] offset: u64, #[range(1..66)] width: u64) -> bool {
+    pub fn action_open_edge_position(&mut self, #[range(0..9)] p: usize, #[range(0..2)] u: usize, high: bool, #[range(0..67)] offset: u64, #[range(1..66)] width: u64) -> bool {
         if !edge_enabled() {
             return false;
         }
-        let p = p % NP;
+        let p = p % self.pools.len();
         let Some((lower, upper)) = Self::ticks_in_edge(high, offset, width) else { return false };
         self.pools[p].live && self.open_position(p, u % NU, lower, upper)
     }
 
-    pub fn action_increase(&mut self, #[range(0..8)] p: usize, #[range(0..8)] k: usize, #[range(1..1_000_000)] ppm: u64, #[range(0..28)] shift: u32, #[range(0..4)] bound: u64, tight_b: bool, #[range(0..3)] method: u64) -> bool {
-        let p = p % NP;
+    pub fn action_increase(&mut self, #[range(0..9)] p: usize, #[range(0..8)] k: usize, #[range(1..1_000_000)] ppm: u64, #[range(0..28)] shift: u32, #[range(0..4)] bound: u64, tight_b: bool, #[range(0..3)] method: u64) -> bool {
+        let p = p % self.pools.len();
         if !self.pools[p].live || self.pools[p].positions.is_empty() {
             return false;
         }
@@ -997,8 +1065,8 @@ impl Fixture {
         self.change_liquidity(p, k, method, true, liquidity, bound, tight_b, amounts)
     }
 
-    pub fn action_decrease(&mut self, #[range(0..8)] p: usize, #[range(0..8)] k: usize, #[range(1..1_000_001)] ppm: u64, dust: bool, #[range(0..4)] bound: u64, tight_b: bool, v1: bool) -> bool {
-        let p = p % NP;
+    pub fn action_decrease(&mut self, #[range(0..9)] p: usize, #[range(0..8)] k: usize, #[range(1..1_000_001)] ppm: u64, dust: bool, #[range(0..4)] bound: u64, tight_b: bool, v1: bool) -> bool {
+        let p = p % self.pools.len();
         if !self.pools[p].live || self.pools[p].positions.is_empty() {
             return false;
         }
@@ -1012,8 +1080,8 @@ impl Fixture {
         self.change_liquidity(p, k, method, false, liquidity, bound, tight_b, (0, 0))
     }
 
-    pub fn action_reposition(&mut self, #[range(0..8)] p: usize, #[range(0..8)] k: usize, #[range(0..264)] lower_slot: u64, #[range(1..200)] width: u64, #[range(1..1_000_000)] ppm: u64) -> bool {
-        let p = p % NP;
+    pub fn action_reposition(&mut self, #[range(0..9)] p: usize, #[range(0..8)] k: usize, #[range(0..264)] lower_slot: u64, #[range(1..200)] width: u64, #[range(1..1_000_000)] ppm: u64) -> bool {
+        let p = p % self.pools.len();
         // reposition uses the directional TransferHookDeposit/Withdrawal account
         // types, not wired here; skip hook pools.
         if !self.pools[p].live || self.pools[p].positions.is_empty() || self.pools[p].has_hook() {
@@ -1067,8 +1135,8 @@ impl Fixture {
         true
     }
 
-    pub fn action_swap(&mut self, #[range(0..8)] p: usize, #[range(0..2)] u: usize, a_to_b: bool, exact_in: bool, #[range(1..1_000_000)] ppm: u64, dust: bool, #[range(0..4)] bound: u64) -> bool {
-        let p = p % NP;
+    pub fn action_swap(&mut self, #[range(0..9)] p: usize, #[range(0..2)] u: usize, a_to_b: bool, exact_in: bool, #[range(1..1_000_000)] ppm: u64, dust: bool, #[range(0..4)] bound: u64) -> bool {
+        let p = p % self.pools.len();
         if !self.pools[p].live {
             return false;
         }
@@ -1078,8 +1146,8 @@ impl Fixture {
         self.swap(p, u % NU, a_to_b, exact_in, amount, bound)
     }
 
-    pub fn action_collect_fees(&mut self, #[range(0..8)] p: usize, #[range(0..8)] k: usize) -> bool {
-        let p = p % NP;
+    pub fn action_collect_fees(&mut self, #[range(0..9)] p: usize, #[range(0..8)] k: usize) -> bool {
+        let p = p % self.pools.len();
         if !self.pools[p].live || self.pools[p].positions.is_empty() {
             return false;
         }
@@ -1099,8 +1167,8 @@ impl Fixture {
         ok
     }
 
-    pub fn action_collect_protocol_fees(&mut self, #[range(0..8)] p: usize) -> bool {
-        let p = p % NP;
+    pub fn action_collect_protocol_fees(&mut self, #[range(0..9)] p: usize) -> bool {
+        let p = p % self.pools.len();
         if !self.pools[p].live {
             return false;
         }
@@ -1116,8 +1184,8 @@ impl Fixture {
     /// Tokens sent straight into a vault. A CLMM does not read reserves from
     /// vault balances, so this must not change any accounting; it only leaves
     /// dust the exit check has to tolerate.
-    pub fn action_donate(&mut self, #[range(0..8)] p: usize, #[range(0..2)] u: usize, side_b: bool, #[range(1..1_000_000)] ppm: u64, dust: bool) -> bool {
-        let p = p % NP;
+    pub fn action_donate(&mut self, #[range(0..9)] p: usize, #[range(0..2)] u: usize, side_b: bool, #[range(1..1_000_000)] ppm: u64, dust: bool) -> bool {
+        let p = p % self.pools.len();
         if !self.pools[p].live {
             return false;
         }
@@ -1139,8 +1207,8 @@ impl Fixture {
         true
     }
 
-    pub fn action_issuer_set_fee(&mut self, #[range(0..8)] p: usize, side_b: bool, #[range(0..10_001)] bps: u64, #[range(0..1_000_000)] max_fee: u64) -> bool {
-        let p = p % NP;
+    pub fn action_issuer_set_fee(&mut self, #[range(0..9)] p: usize, side_b: bool, #[range(0..10_001)] bps: u64, #[range(0..1_000_000)] max_fee: u64) -> bool {
+        let p = p % self.pools.len();
         let m = if side_b { self.pools[p].mb.clone() } else { self.pools[p].ma.clone() };
         if m.profile.transfer_fee_params().is_none() {
             return false;
@@ -1160,9 +1228,9 @@ impl Fixture {
     /// Harness self-test (FF_CANARY): `1` skims one unit from a vault, which
     /// the exit check must catch once that pool's LPs try to leave; `diff`
     /// skims on the reference build only, which the state comparison must catch.
-    pub fn action_canary_skim(&mut self, #[range(0..8)] p: usize, side_b: bool) -> bool {
+    pub fn action_canary_skim(&mut self, #[range(0..9)] p: usize, side_b: bool) -> bool {
         let Ok(mode) = std::env::var("FF_CANARY") else { return false };
-        let p = p % NP;
+        let p = p % self.pools.len();
         if !self.pools[p].live {
             return false;
         }
@@ -1185,7 +1253,7 @@ impl Fixture {
 
 #[invariant_test]
 fn whirlpool_invariants(fixture: &mut Fixture) {
-    for p in 0..NP {
+    for p in 0..fixture.pools.len() {
         if !fixture.pools[p].live {
             continue;
         }

@@ -46,14 +46,25 @@ pub fn init_extra_account_meta_list_ix(payer: &Pubkey, mint: &Pubkey) -> Instruc
     }
 }
 
-/// The accounts a caller must pass as a hook's "remaining accounts" so the SPL
-/// interface can resolve and run the Execute CPI: the validation account, the
-/// counter (written by the hook), and the hook program itself. Order does not
-/// matter; the resolver indexes by key.
-pub fn remaining_accounts(mint: &Pubkey) -> [AccountMeta; 3] {
+/// The counter hook's "verify" account-order PDA. Its ExtraAccountMetaList
+/// declares it with seeds `["verify", source, mint, destination, owner]`, so it
+/// changes with every transfer's direction and accounts. The hook uses it to
+/// confirm the caller passed accounts in the right order.
+pub fn verify(mint: &Pubkey, source: &Pubkey, destination: &Pubkey, owner: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"verify", source.as_ref(), mint.as_ref(), destination.as_ref(), owner.as_ref()], &PROGRAM).0
+}
+
+/// The accounts a caller passes as a hook's "remaining accounts" for one
+/// transfer so the SPL interface can resolve and run the Execute CPI. The
+/// ExtraAccountMetaList declares two extras (counter, writable; verify,
+/// read-only), both derived from this transfer's `(source, mint, destination,
+/// owner)`; the validation account and the program are found by key. Order
+/// does not matter; the resolver indexes by key.
+pub fn remaining_accounts(mint: &Pubkey, source: &Pubkey, destination: &Pubkey, owner: &Pubkey) -> [AccountMeta; 4] {
     [
         AccountMeta::new_readonly(extra_metas(mint), false),
         AccountMeta::new(counter(mint), false),
+        AccountMeta::new_readonly(verify(mint, source, destination, owner), false),
         AccountMeta::new_readonly(PROGRAM, false),
     ]
 }

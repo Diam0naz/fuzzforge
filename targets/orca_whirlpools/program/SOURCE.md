@@ -111,23 +111,33 @@ behaviourally identical to the Anchor code it replaced, across the mint
 matrix and at the price extremes, within the scope fuzzed. Still not
 covered: transfer-hook pools, rewards, and adaptive-fee pools.
 
-## Transfer-hook pools (scaffolded, not yet driven)
+## Transfer-hook pools (FF_HOOK)
 
-Whirlpools accepts transfer-hook Token-2022 mints when a token badge exists,
-and threads hook accounts through `remaining_accounts`. The pieces are in
-place: `fuzzforge_scenarios::hook` (Orca's counter-hook program id, PDAs and
-`InitializeExtraAccountMetaList`), a `TransferHookActive` mint profile, the
-`AnchorIx` encoding of `RemainingAccountsInfo`, and the harness's `hook_ra`
-wiring on every v2 instruction (`FF_HOOK=1` loads the fixture).
+`FF_HOOK=1` adds a ninth pool whose token A is a Token-2022 mint with an active
+transfer hook (Orca's counter hook), loads the hook fixture, and drives it
+through every v2 instruction. Each transfer resolves the mint's
+`ExtraAccountMetaList` at run time: the list declares a `counter` PDA
+(`["counter", mint]`, writable) and an order-verifying `verify` PDA
+(`["verify", source, mint, destination, owner]`, read-only, so it changes with
+the transfer's direction), and the harness derives both per transfer.
+`fuzzforge_scenarios::hook` holds the program id, PDAs and
+`InitializeExtraAccountMetaList`.
 
-It is not yet driven end to end. Orca's `transfer_hook_counter.so` declares
-order-verified extra accounts, so a caller cannot hard-code the hook's
-remaining accounts; it must read the mint's `ExtraAccountMetaList` and resolve
-it at transfer time (as the SDK's `addExtraAccountMetasForExecute` does).
-Until that runtime resolution lands, no pool in `POOLS` uses
-`TransferHookActive`, so the default 8-pool matrix is unaffected.
+Verified 2026-11-12: the hook runs on every transfer (its counter increments),
+and FF_HOOK is clean over ~7k executions, 0 crashes, with edge coverage up
+from 18.0% to 18.7% (the hook program is now exercised). The exit-liveness
+check is skipped for hook pools: Orca's counter hook rejects transfers over
+~1e12 (`AmountTooBig`), a hook's own choice that Whirlpools correctly reverts,
+so "every LP can always withdraw in full" is not an invariant there. Solvency,
+slippage, round-trip and upgrade-diff still apply.
 
-The fixture is Orca's, under `legacy-sdk/whirlpool/tests/external_program/
-transfer_hook_counter.so` (program id
-`EBZDYx7599krFc4m2govwBdZcicr4GgepqC78m71nsHS`); copy it to
-`program/fixtures/` (gitignored).
+The fixture is Orca's `transfer_hook_counter.so` (program id
+`EBZDYx7599krFc4m2govwBdZcicr4GgepqC78m71nsHS`), under
+`legacy-sdk/whirlpool/tests/external_program/`; copy it to `program/fixtures/`
+(gitignored):
+
+```sh
+cp ~/src/targets/whirlpools/legacy-sdk/whirlpool/tests/external_program/transfer_hook_counter.so \
+  program/fixtures/
+FF_HOOK=1 crucible run -C . orca_whirlpools whirlpool_invariants --release --cores 4 --timeout 900
+```
