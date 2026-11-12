@@ -110,3 +110,24 @@ states) — the Pinocchio port of the four liquidity instructions is
 behaviourally identical to the Anchor code it replaced, across the mint
 matrix and at the price extremes, within the scope fuzzed. Still not
 covered: transfer-hook pools, rewards, and adaptive-fee pools.
+
+## Transfer-hook pools (scaffolded, not yet driven)
+
+Whirlpools accepts transfer-hook Token-2022 mints when a token badge exists,
+and threads hook accounts through `remaining_accounts`. The pieces are in
+place: `fuzzforge_scenarios::hook` (Orca's counter-hook program id, PDAs and
+`InitializeExtraAccountMetaList`), a `TransferHookActive` mint profile, the
+`AnchorIx` encoding of `RemainingAccountsInfo`, and the harness's `hook_ra`
+wiring on every v2 instruction (`FF_HOOK=1` loads the fixture).
+
+It is not yet driven end to end. Orca's `transfer_hook_counter.so` declares
+order-verified extra accounts, so a caller cannot hard-code the hook's
+remaining accounts; it must read the mint's `ExtraAccountMetaList` and resolve
+it at transfer time (as the SDK's `addExtraAccountMetasForExecute` does).
+Until that runtime resolution lands, no pool in `POOLS` uses
+`TransferHookActive`, so the default 8-pool matrix is unaffected.
+
+The fixture is Orca's, under `legacy-sdk/whirlpool/tests/external_program/
+transfer_hook_counter.so` (program id
+`EBZDYx7599krFc4m2govwBdZcicr4GgepqC78m71nsHS`); copy it to
+`program/fixtures/` (gitignored).

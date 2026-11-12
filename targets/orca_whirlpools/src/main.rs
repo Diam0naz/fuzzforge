@@ -35,6 +35,8 @@ use crucible_fuzzer::*;
 use fuzzforge_scenarios::anchor::{account_discriminator, det_keypair, read_i32, read_pubkey, read_u128, read_u64, AnchorIx};
 use fuzzforge_scenarios::invariants::summarize_logs;
 use fuzzforge_scenarios::token2022::{read_token_account, MintHandle, MintProfile, TokenEnv, SPL_TOKEN_ID};
+use fuzzforge_scenarios::hook;
+use solana_instruction::AccountMeta;
 use fuzzforge_scenarios::{compute, diff};
 use solana_account::Account;
 use solana_keypair::Keypair;
@@ -75,6 +77,15 @@ const HI_LO_TICK: i32 = EDGE_HI_START; // 439296, bottom of high array
 fn edge_enabled() -> bool {
     std::env::var("FF_EDGE").is_ok()
 }
+
+/// Load the counter-hook fixture (program/fixtures/transfer_hook_counter.so).
+/// Transfer-hook pools are scaffolded but not yet driven end to end: Orca's
+/// counter hook declares order-verified extra accounts, so a caller must
+/// resolve its ExtraAccountMetaList at runtime. Until that lands no pool in
+/// POOLS uses TransferHookActive, so this stays off by default.
+fn hook_fixture_enabled() -> bool {
+    std::env::var("FF_HOOK").is_ok()
+}
 const FEE_RATE: u16 = 3_000; // 0.3%, hundredths of a basis point
 const PROTOCOL_FEE_RATE: u16 = 1_300; // 13% of fees, basis points
 const SQRT_PRICE_ONE: u128 = 1 << 64;
@@ -109,7 +120,7 @@ const NP: usize = POOLS.len();
 const NU: usize = 2;
 
 fn needs_badge(p: MintProfile) -> bool {
-    matches!(p, FreezeAuthority | PermanentDelegate | TransferHook)
+    matches!(p, FreezeAuthority | PermanentDelegate | TransferHook | TransferHookActive)
 }
 
 #[derive(Clone)]
@@ -143,6 +154,10 @@ struct Pool {
 impl Pool {
     fn both_spl(&self) -> bool {
         self.ma.token_program == SPL_TOKEN_ID && self.mb.token_program == SPL_TOKEN_ID
+    }
+
+    fn has_hook(&self) -> bool {
+        self.ma.profile == MintProfile::TransferHookActive || self.mb.profile == MintProfile::TransferHookActive
     }
 }
 
@@ -314,17 +329,47 @@ impl Fixture {
 
     // ---- instruction builders -------------------------------------------
 
+    /// For a v2 instruction on `pool`, the Borsh-encoded `remaining_accounts_info`
+    /// and the hook accounts to append. A non-hook pool gets `Option::None`
+    /// (one byte) and no accounts. A hooked side adds a `TransferHookA` (0) or
+    /// `TransferHookB` (1) slice of three accounts: validation, counter, program.
+    fn hook_ra(&self, pool: &Pool) -> (Vec<u8>, Vec<AccountMeta>) {
+        let a = pool.ma.profile == MintProfile::TransferHookActive;
+        let b = pool.mb.profile == MintProfile::TransferHookActive;
+        if !a && !b {
+            return (vec![0], Vec::new());
+        }
+        let mut slices: Vec<(u8, u8)> = Vec::new();
+        let mut metas: Vec<AccountMeta> = Vec::new();
+        if a {
+            slices.push((0, 3));
+            metas.extend(hook::remaining_accounts(&pool.ma.mint));
+        }
+        if b {
+            slices.push((1, 3));
+            metas.extend(hook::remaining_accounts(&pool.mb.mint));
+        }
+        let mut data = vec![1u8]; // Option::Some
+        data.extend_from_slice(&(slices.len() as u32).to_le_bytes());
+        for (t, l) in slices {
+            data.push(t);
+            data.push(l);
+        }
+        (data, metas)
+    }
+
     fn liquidity_ix(&self, p: usize, k: usize, method: Method, increase: bool, liquidity: u128, limit_a: u64, limit_b: u64) -> Instruction {
         let pool = &self.pools[p];
         let pos = &pool.positions[k];
         let user = self.users[pos.owner].pubkey();
+        let (ra, metas) = self.hook_ra(pool);
         let (lower, upper) = (tick_array(&pool.state, array_start(pos.lower)), tick_array(&pool.state, array_start(pos.upper)));
         let b = match (method, increase) {
             (Method::V1, true) => AnchorIx::new(PROGRAM_ID, "increase_liquidity").u128(liquidity).u64(limit_a).u64(limit_b),
             (Method::V1, false) => AnchorIx::new(PROGRAM_ID, "decrease_liquidity").u128(liquidity).u64(limit_a).u64(limit_b),
-            (Method::V2, true) => AnchorIx::new(PROGRAM_ID, "increase_liquidity_v2").u128(liquidity).u64(limit_a).u64(limit_b).option_tag(false),
+            (Method::V2, true) => AnchorIx::new(PROGRAM_ID, "increase_liquidity_v2").u128(liquidity).u64(limit_a).u64(limit_b).raw(&ra),
             (Method::V2, false) | (Method::ByTokenAmounts, false) => {
-                AnchorIx::new(PROGRAM_ID, "decrease_liquidity_v2").u128(liquidity).u64(limit_a).u64(limit_b).option_tag(false)
+                AnchorIx::new(PROGRAM_ID, "decrease_liquidity_v2").u128(liquidity).u64(limit_a).u64(limit_b).raw(&ra)
             }
             (Method::ByTokenAmounts, true) => AnchorIx::new(PROGRAM_ID, "increase_liquidity_by_token_amounts_v2")
                 .u8(0)
@@ -332,7 +377,7 @@ impl Fixture {
                 .u64(limit_b)
                 .u128(MIN_SQRT_PRICE)
                 .u128(MAX_SQRT_PRICE)
-                .option_tag(false),
+                .raw(&ra),
         };
         let b = if method == Method::V1 {
             b.mutable(pool.state)
@@ -363,7 +408,8 @@ impl Fixture {
                 .mutable(lower)
                 .mutable(upper)
         };
-        b.build()
+        // Hook accounts (empty for v1 and non-hook pools) go last.
+        b.metas(&metas).build()
     }
 
     fn update_fees_ix(&self, p: usize, k: usize) -> Instruction {
@@ -380,8 +426,9 @@ impl Fixture {
     fn collect_fees_ix(&self, p: usize, k: usize) -> Instruction {
         let pool = &self.pools[p];
         let pos = &pool.positions[k];
+        let (ra, metas) = self.hook_ra(pool);
         AnchorIx::new(PROGRAM_ID, "collect_fees_v2")
-            .option_tag(false)
+            .raw(&ra)
             .readonly(pool.state)
             .signer(self.users[pos.owner].pubkey())
             .mutable(pos.address)
@@ -395,13 +442,15 @@ impl Fixture {
             .readonly(pool.ma.token_program)
             .readonly(pool.mb.token_program)
             .readonly(MEMO)
+            .metas(&metas)
             .build()
     }
 
     fn collect_protocol_fees_ix(&self, p: usize) -> Instruction {
         let pool = &self.pools[p];
+        let (ra, metas) = self.hook_ra(pool);
         AnchorIx::new(PROGRAM_ID, "collect_protocol_fees_v2")
-            .option_tag(false)
+            .raw(&ra)
             .readonly(self.config)
             .mutable(pool.state)
             .signer(self.protocol_authority.pubkey())
@@ -414,6 +463,7 @@ impl Fixture {
             .readonly(pool.ma.token_program)
             .readonly(pool.mb.token_program)
             .readonly(MEMO)
+            .metas(&metas)
             .build()
     }
 
@@ -423,6 +473,7 @@ impl Fixture {
         let s0 = array_start(v.tick);
         let step = if a_to_b { -ARRAY_SPAN } else { ARRAY_SPAN };
         let arrays = [s0, s0 + step, s0 + 2 * step].map(|s| tick_array(&pool.state, s));
+        let (ra, metas) = self.hook_ra(pool);
         Some(
             AnchorIx::new(PROGRAM_ID, "swap_v2")
                 .u64(amount)
@@ -430,7 +481,7 @@ impl Fixture {
                 .u128(if a_to_b { MIN_SQRT_PRICE } else { MAX_SQRT_PRICE })
                 .bool(exact_in)
                 .bool(a_to_b)
-                .option_tag(false)
+                .raw(&ra)
                 .readonly(pool.ma.token_program)
                 .readonly(pool.mb.token_program)
                 .readonly(MEMO)
@@ -446,6 +497,7 @@ impl Fixture {
                 .mutable(arrays[1])
                 .mutable(arrays[2])
                 .mutable(pda(&[b"oracle", pool.state.as_ref()]))
+                .metas(&metas)
                 .build(),
         )
     }
@@ -609,6 +661,9 @@ impl Fixture {
     fn build(so: &str, announce: bool) -> Self {
         let mut ctx = TestContext::new();
         ctx.add_program(&PROGRAM_ID, so).unwrap_or_else(|e| panic!("load {so}: {e:?}"));
+        if hook_fixture_enabled() {
+            ctx.add_program(&hook::PROGRAM, "program/fixtures/transfer_hook_counter.so").unwrap_or_else(|e| panic!("load counter hook: {e:?}"));
+        }
         set_time(&mut ctx, START_TS);
 
         let users = [Rc::new(det_keypair("wp-user-0")), Rc::new(det_keypair("wp-user-1"))];
@@ -772,6 +827,15 @@ impl Fixture {
         };
         if !full {
             return Ok(pool);
+        }
+        // A resolvable transfer hook needs its ExtraAccountMetaList and counter
+        // before any transfer. Minting to users below is not a transfer, so this
+        // only has to precede the seed deposit.
+        for m in [&ma, &mb] {
+            if m.profile == MintProfile::TransferHookActive {
+                let ix = hook::init_extra_account_meta_list_ix(&funder.pubkey(), &m.mint);
+                send(&mut self.ctx, ix, &[&*funder]).map_err(|e| format!("hook metas for {}: {}", m.mint, e.msg))?;
+            }
         }
         let mut starts = ARRAY_STARTS.to_vec();
         if edge_enabled() {
@@ -950,7 +1014,9 @@ impl Fixture {
 
     pub fn action_reposition(&mut self, #[range(0..8)] p: usize, #[range(0..8)] k: usize, #[range(0..264)] lower_slot: u64, #[range(1..200)] width: u64, #[range(1..1_000_000)] ppm: u64) -> bool {
         let p = p % NP;
-        if !self.pools[p].live || self.pools[p].positions.is_empty() {
+        // reposition uses the directional TransferHookDeposit/Withdrawal account
+        // types, not wired here; skip hook pools.
+        if !self.pools[p].live || self.pools[p].positions.is_empty() || self.pools[p].has_hook() {
             return false;
         }
         let k = k % self.pools[p].positions.len();

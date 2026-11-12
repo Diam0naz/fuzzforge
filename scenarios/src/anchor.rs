@@ -59,6 +59,24 @@ impl AnchorIx {
         self
     }
 
+    pub fn u32(mut self, v: u32) -> Self {
+        self.data.extend_from_slice(&v.to_le_bytes());
+        self
+    }
+
+    /// Append raw bytes to the instruction data (e.g. a pre-encoded Borsh value).
+    pub fn raw(mut self, bytes: &[u8]) -> Self {
+        self.data.extend_from_slice(bytes);
+        self
+    }
+
+    /// Append pre-built account metas, in order, after the fixed accounts
+    /// (for an instruction's trailing "remaining accounts").
+    pub fn metas(mut self, metas: &[AccountMeta]) -> Self {
+        self.accounts.extend_from_slice(metas);
+        self
+    }
+
     pub fn i32(mut self, v: i32) -> Self {
         self.data.extend_from_slice(&v.to_le_bytes());
         self

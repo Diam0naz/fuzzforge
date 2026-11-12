@@ -2714,6 +2714,7 @@ dependencies = [
  "libafl",
  "libafl_bolts",
  "solana-account",
+ "solana-instruction",
  "solana-keypair",
  "solana-pubkey 3.0.0",
  "solana-signer",

@@ -18,6 +18,7 @@
 pub mod anchor;
 pub mod compute;
 pub mod diff;
+pub mod hook;
 pub mod invariants;
 pub mod token2022;
 

@@ -24,7 +24,7 @@ fn shipped_policy_loads_and_hashes() {
     let p = policy();
     assert_eq!(p.allowed.len(), 7);
     assert_eq!(p.sha256.len(), 64);
-    assert_eq!(p.describe().len(), 9);
+    assert_eq!(p.describe().len(), 11);
 }
 
 #[test]

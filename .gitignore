@@ -19,6 +19,7 @@ cu-profile-*/
 targets/*/program/reference/
 # Mainnet dumps used as fuzz targets (re-dump with the command in SOURCE.md)
 targets/orca_whirlpools/program/*.so
+targets/orca_whirlpools/program/fixtures/*.so
 
 # Local agent/editor tooling
 .claude/

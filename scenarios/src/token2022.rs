@@ -57,6 +57,10 @@ pub enum MintProfile {
     TransferFeeMax,
     /// Interest-bearing mint (UI-only extension; raw amounts are unaffected).
     InterestBearing,
+    /// Token-2022 mint whose transfer hook points at Orca's counter hook, which
+    /// is resolvable, so transfers succeed. For programs that accept hooked
+    /// mints with a badge.
+    TransferHookActive,
 }
 
 impl MintProfile {
@@ -94,6 +98,7 @@ impl MintProfile {
             MintProfile::TransferFeeCapped => "token-2022+transfer-fee-capped",
             MintProfile::TransferFeeMax => "token-2022+transfer-fee-100pct",
             MintProfile::InterestBearing => "token-2022+interest-bearing",
+            MintProfile::TransferHookActive => "token-2022+transfer-hook-active",
         }
     }
 
@@ -126,7 +131,7 @@ impl MintProfile {
             }
             MintProfile::InterestBearing => vec![ExtensionType::InterestBearingConfig],
             MintProfile::PermanentDelegate => vec![ExtensionType::PermanentDelegate],
-            MintProfile::TransferHook => vec![ExtensionType::TransferHook],
+            MintProfile::TransferHook | MintProfile::TransferHookActive => vec![ExtensionType::TransferHook],
             MintProfile::NonTransferable => vec![ExtensionType::NonTransferable],
         }
     }
@@ -222,6 +227,16 @@ impl TokenEnv<'_> {
                     &mint_pk,
                     Some(attacker),
                     Some(UNRESOLVED_HOOK_PROGRAM),
+                )?,
+                &[payer],
+            )?,
+            MintProfile::TransferHookActive => send(
+                ctx,
+                transfer_hook::instruction::initialize(
+                    &program,
+                    &mint_pk,
+                    Some(attacker),
+                    Some(crate::hook::PROGRAM),
                 )?,
                 &[payer],
             )?,
