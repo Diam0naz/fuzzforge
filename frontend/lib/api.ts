@@ -3,7 +3,7 @@ export const API_URL = (
 ).replace(/\/$/, "");
 
 export const CONTACT_EMAIL =
-  process.env.NEXT_PUBLIC_CONTACT_EMAIL ?? "hello@example.com";
+  process.env.NEXT_PUBLIC_CONTACT_EMAIL ?? "jutenoh@gmail.com";
 
 export type JobState ="queued" | "running" | "done" | "failed";
 

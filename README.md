@@ -94,6 +94,33 @@ make up
 
 Open <http://localhost:3000>, submit a bundle, and watch the job page.
 
+### Deploy the frontend to Vercel
+
+The frontend (`frontend/`) is a standalone Next.js app and deploys to Vercel
+on its own. **Vercel hosts only the UI** — the API, worker, Postgres and the
+Docker sandbox do not run there, so the deployed site needs the API hosted
+elsewhere (a VM or container host) and reachable from the browser. Until that
+exists the site loads but cannot submit or track jobs.
+
+From the Vercel dashboard: import the GitHub repo, set **Root Directory** to
+`frontend`, and add the environment variables below. Or with the CLI:
+
+```bash
+cd frontend
+npx vercel            # first run links the project; set root dir to .
+npx vercel --prod
+```
+
+Environment variables (see `frontend/.env.example`):
+
+| Variable | Purpose |
+|---|---|
+| `NEXT_PUBLIC_API_URL` | The hosted Fuzzforge API base URL. Without it the UI calls `localhost:8080`. |
+| `NEXT_PUBLIC_CONTACT_EMAIL` | Contact address in the site's mailto links. |
+
+After the API is hosted, set its `CORS_ORIGINS` to include the Vercel URL, or
+the browser blocks every response even though the request succeeds.
+
 The sample bundle is useful for exercising intake, **not** for producing a real
 report:
 
