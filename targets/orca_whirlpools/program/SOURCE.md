@@ -98,3 +98,15 @@ All other instructions are within ±260 units.
 - positions near the min and max tick;
 - rewards;
 - adaptive-fee pools.
+
+**2026-11-12, stateful + edge, port vs pre-port** (`822f213` vs `71569ae`,
+`FF_EDGE=1`, 4 cores, `--stateful`): 1,373,543 iterations, 38,413 novel
+states, 0 crashes, 0 differences in outcome or state, 0 broker errors. The
+run converged and exited at ~13 minutes. Edge positions (near min/max tick)
+and long action chains add no difference between the two builds.
+
+Taken together — stateless (46k exec), stateful + edge (1.37M iter, 38k
+states) — the Pinocchio port of the four liquidity instructions is
+behaviourally identical to the Anchor code it replaced, across the mint
+matrix and at the price extremes, within the scope fuzzed. Still not
+covered: transfer-hook pools, rewards, and adaptive-fee pools.
