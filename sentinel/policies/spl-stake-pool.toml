@@ -58,3 +58,12 @@ window = 20
 max_failed = 15
 why = "Many failing transactions against one pool in a short window is what probing looks like."
 vetted = "2026-11-11 QUIET: quiet on legitimate activity; nothing in this vet makes it fire, so its positive evidence must come from observed probing traffic [basis: 4 drill cases on Jito…Awbb; 8 watch rounds on 2 markets]"
+
+[rules.reserve-drop]
+action = "alert"
+max_bps = 1000
+why = "A stake pool losing more than 10% of its lamports between rounds is a run or a drain. Stake pools only shrink by withdrawals, so a fast drop is worth paging on. Alert, not block."
+
+[rules.foreign-cpi]
+action = "alert"
+why = "A program outside the allowlist touching the pool in a recent transaction is an unexpected integrator or an abnormal CPI path worth a look."

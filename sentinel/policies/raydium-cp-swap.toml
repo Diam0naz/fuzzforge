@@ -79,3 +79,12 @@ max_failed = 15
 why = "Many failing transactions against one pool in a short window is what probing looks like: an attacker, human or agent, searching for an input that works."
 evidence = "NOISY, tune per pool: backtest 2026-11-11, pool 54Gt…qXmS had 116 of 300 transactions fail (bot traffic) and 38 windows crossed this limit. Monitor fired once in 20 rounds, on 3N1C…PJvj (17 of 20 failed)."
 vetted = "2026-11-11 NOISY: fired on legitimate activity: 23 windows in backtest of 54Gt…qXmS (59 of 200 transactions failed); 52 windows in backtest of 3N1C…PJvj (126 of 200 transactions failed) [basis: 6 drill cases on 54Gt…qXmS; backtest of 54Gt…qXmS (200 signatures, slots 468138301-468144628); backtest of 3N1C…PJvj (200 signatures, slots 468142807-468145762); 6 watch rounds on 2 markets]"
+
+[rules.reserve-drop]
+action = "alert"
+max_bps = 2000
+why = "A pool losing more than 20% of a reserve between monitor rounds is a drain or a run, even when spread across many transactions that each stay under the per-instruction reserve-outflow limit. Alert, not block: large legitimate rebalances happen."
+
+[rules.foreign-cpi]
+action = "alert"
+why = "A program outside the allowlist touching the pool in a recent transaction is an unexpected integrator or an abnormal CPI path worth a look. Alert only: new routers and aggregators are usually benign."

@@ -80,6 +80,29 @@ pub struct WatchArgs<'a> {
     pub interval_secs: u64,
     pub rounds: Option<u64>,
     pub max_tx_per_round: usize,
+    /// Optional webhook: every finding is also POSTed here as JSON, so a team
+    /// gets paged. Delivery is best effort; a down endpoint never stops the
+    /// monitor. Findings always go to `out` as well.
+    pub alert_url: Option<&'a str>,
+}
+
+/// Best-effort webhook for findings.
+struct AlertSink {
+    agent: ureq::Agent,
+    url: String,
+}
+
+impl AlertSink {
+    fn new(url: &str) -> Self {
+        let cfg = ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(10))).build();
+        Self { agent: cfg.into(), url: url.to_string() }
+    }
+
+    fn post(&self, rec: &serde_json::Value) {
+        if let Err(e) = self.agent.post(&self.url).send_json(rec) {
+            eprintln!("[sentinel] alert webhook failed: {e}");
+        }
+    }
 }
 
 pub fn watch(rpc: &Rpc, policy: &Policy, args: WatchArgs, out: &mut dyn Write) -> Result<()> {
@@ -95,6 +118,7 @@ pub fn watch(rpc: &Rpc, policy: &Policy, args: WatchArgs, out: &mut dyn Write) -
     let mut last_sig: Vec<Option<String>> = vec![None; pools.len()];
     let mut recent: Vec<Vec<bool>> = vec![Vec::new(); pools.len()];
     let mut firing: HashSet<(usize, &'static str)> = HashSet::new();
+    let sink = args.alert_url.map(AlertSink::new);
     let emit = |out: &mut dyn Write, slot: u64, pool: Option<&Pubkey>, sig: Option<&str>, f: &Finding| -> Result<()> {
         let rec = json!({
             "at": now(), "slot": slot, "pool": pool.map(|p| p.to_string()), "signature": sig,
@@ -103,6 +127,9 @@ pub fn watch(rpc: &Rpc, policy: &Policy, args: WatchArgs, out: &mut dyn Write) -
         });
         writeln!(out, "{rec}")?;
         out.flush()?;
+        if let Some(s) = &sink {
+            s.post(&rec);
+        }
         Ok(())
     };
     for f in &first {
@@ -127,6 +154,7 @@ pub fn watch(rpc: &Rpc, policy: &Policy, args: WatchArgs, out: &mut dyn Write) -
                 // per-instruction check below is the meaningful one.
                 let mut state_findings = Vec::new();
                 rules::transition(policy, protocol, &label, last_view[i].as_ref(), &now_snap, &mut state_findings);
+                rules::reserve_drop(policy, &label, last_view[i].as_ref(), &now_snap, &mut state_findings);
                 found.extend(state_findings.into_iter().filter(|f| f.rule != "reserve-outflow"));
                 last_view[i] = Some(now_snap);
             }
@@ -145,13 +173,19 @@ pub fn watch(rpc: &Rpc, policy: &Policy, args: WatchArgs, out: &mut dyn Write) -
             rules::burst(policy, &label, &recent[i], &mut found);
 
             let logged_events = protocol == Protocol::RaydiumCpSwap;
-            for s in sigs.iter().filter(|s| logged_events && !s.failed).rev().take(args.max_tx_per_round) {
+            let want_cpi = policy.rules.foreign_cpi.is_some();
+            for s in sigs.iter().filter(|s| (logged_events || want_cpi) && !s.failed).rev().take(args.max_tx_per_round) {
                 let Some(tx) = rpc.transaction(&s.signature)? else { continue };
                 n_tx += 1;
                 let (evs, _) = events(&program, &tx.logs);
                 let mut tx_findings = Vec::new();
-                for ev in evs.iter().filter(|e| e.pool() == pool.key) {
-                    rules::event_outflow(policy, &label, ev, &mut tx_findings);
+                if logged_events {
+                    for ev in evs.iter().filter(|e| e.pool() == pool.key) {
+                        rules::event_outflow(policy, &label, ev, &mut tx_findings);
+                    }
+                }
+                if want_cpi {
+                    rules::foreign_cpi(policy, &label, &s.signature, &crate::fork::invoked_programs(&tx.logs), &mut tx_findings);
                 }
                 for f in &tx_findings {
                     emit(out, tx.slot, Some(&pool.key), Some(&s.signature), f)?;

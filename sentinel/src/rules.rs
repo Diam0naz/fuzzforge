@@ -126,6 +126,49 @@ pub fn allowlist(policy: &Policy, invoked: &[Pubkey], out: &mut Findings) {
     }
 }
 
+/// Early warning: a reserve leg fell more than `max_bps` since the previous
+/// monitor round. Each leg is compared on its own, so two-token pools never
+/// mix tokens of different scale.
+pub fn reserve_drop(policy: &Policy, label: &str, prev: Option<&Snapshot>, now: &Snapshot, out: &mut Findings) {
+    let Some(rule) = &policy.rules.reserve_drop else { return };
+    let Some(prev) = prev else { return };
+    if prev.reserves.len() != now.reserves.len() {
+        return;
+    }
+    for (i, (before, after)) in prev.reserves.iter().zip(&now.reserves).enumerate() {
+        if after >= before {
+            continue;
+        }
+        let moved = bps(before - after, *before);
+        if moved > rule.max_bps {
+            out.push(Finding {
+                rule: "reserve-drop",
+                action: rule.action,
+                detail: format!("{label}: reserve {i} fell {before} -> {after} ({moved} bps since the last round)"),
+            });
+        }
+    }
+}
+
+/// Early warning: a program outside the allowlist touched this pool in a recent
+/// transaction. Needs `program_allowlist`; without it there is no baseline.
+pub fn foreign_cpi(policy: &Policy, label: &str, signature: &str, invoked: &[Pubkey], out: &mut Findings) {
+    let Some(rule) = &policy.rules.foreign_cpi else { return };
+    if policy.rules.program_allowlist.is_none() {
+        return;
+    }
+    let program = policy.program_id();
+    for p in invoked {
+        if *p != program && !policy.allowed.contains(p) {
+            out.push(Finding {
+                rule: "foreign-cpi",
+                action: rule.action,
+                detail: format!("{label}: program {p} touched the pool in {signature} but is not on the allowlist"),
+            });
+        }
+    }
+}
+
 pub fn compute(policy: &Policy, units: u64, out: &mut Findings) {
     let Some(rule) = &policy.rules.compute_budget else { return };
     if units > rule.max_units {

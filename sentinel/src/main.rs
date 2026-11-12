@@ -57,6 +57,9 @@ enum Cmd {
         /// Append findings here instead of stdout.
         #[arg(long)]
         out: Option<String>,
+        /// Also POST every finding as JSON to this webhook (best effort).
+        #[arg(long)]
+        alert_url: Option<String>,
     },
     /// Fresh transactions from a synthetic user against a live pool, each with
     /// the verdict the policy should reach. Exit 0 only if every case matches.
@@ -213,13 +216,13 @@ fn main() -> Result<()> {
             }
             decide(&rpc, &p, &tx)?
         }
-        Cmd::Watch { policy, pools, interval, rounds, max_tx_per_round, out } => {
+        Cmd::Watch { policy, pools, interval, rounds, max_tx_per_round, out, alert_url } => {
             let p = Policy::load(&policy)?;
             let mut sink: Box<dyn std::io::Write> = match out {
                 Some(path) => Box::new(std::fs::OpenOptions::new().create(true).append(true).open(path)?),
                 None => Box::new(std::io::stdout()),
             };
-            monitor::watch(&rpc, &p, monitor::WatchArgs { pools: &pools, interval_secs: interval, rounds, max_tx_per_round }, &mut *sink)?;
+            monitor::watch(&rpc, &p, monitor::WatchArgs { pools: &pools, interval_secs: interval, rounds, max_tx_per_round, alert_url: alert_url.as_deref() }, &mut *sink)?;
             0
         }
         Cmd::Drill { policy, pool, candidate_so } => {

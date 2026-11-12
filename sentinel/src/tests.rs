@@ -294,3 +294,42 @@ fn signoff_gates_and_goes_stale() {
     assert!(Policy::parse(&again).unwrap().signoff_valid);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn reserve_drop_fires_per_leg() {
+    let toml = "name=\"t\"\nversion=1\nprotocol=\"raydium-cp-swap\"\nprogram=\"CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C\"\n\n[rules.reserve-drop]\naction=\"alert\"\nmax_bps=2000\nwhy=\"w\"\n";
+    let p = Policy::parse(toml).unwrap();
+    let snap = |a: u64, b: u64| Snapshot { reserves: vec![a, b], shares: 1, problems: vec![] };
+    let prev = snap(1_000_000, 1_000_000);
+    let mut out = Vec::new();
+    // 1000 bps drop on leg 0, under the 2000 bps limit.
+    rules::reserve_drop(&p, "pool", Some(&prev), &snap(900_000, 1_000_000), &mut out);
+    assert!(out.is_empty(), "{out:?}");
+    // 3000 bps drop on leg 0.
+    rules::reserve_drop(&p, "pool", Some(&prev), &snap(700_000, 1_000_000), &mut out);
+    assert_eq!(out.iter().map(|f| f.rule).collect::<Vec<_>>(), ["reserve-drop"]);
+    out.clear();
+    // Growth never fires; no prior snapshot never fires.
+    rules::reserve_drop(&p, "pool", Some(&prev), &snap(2_000_000, 2_000_000), &mut out);
+    rules::reserve_drop(&p, "pool", None, &snap(1, 1), &mut out);
+    assert!(out.is_empty());
+}
+
+#[test]
+fn foreign_cpi_needs_an_allowlist() {
+    let with = "name=\"t\"\nversion=1\nprotocol=\"raydium-cp-swap\"\nprogram=\"CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C\"\n\n[rules.foreign-cpi]\naction=\"alert\"\nwhy=\"w\"\n\n[rules.program-allowlist]\naction=\"hold\"\nwhy=\"w\"\nprograms=[\"CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C cp\",\"11111111111111111111111111111111 sys\"]\n";
+    let p = Policy::parse(with).unwrap();
+    let sys = Pubkey::from_str_const("11111111111111111111111111111111");
+    let stranger = Pubkey::new_unique();
+    let mut out = Vec::new();
+    rules::foreign_cpi(&p, "pool", "sig", &[PROGRAM, sys], &mut out);
+    assert!(out.is_empty(), "the program itself and allowlisted ones are fine");
+    rules::foreign_cpi(&p, "pool", "sig", &[stranger], &mut out);
+    assert_eq!((out.len(), out[0].rule), (1, "foreign-cpi"));
+    out.clear();
+    // foreign-cpi without a program-allowlist has no baseline, so it is inert.
+    let without = "name=\"t\"\nversion=1\nprotocol=\"raydium-cp-swap\"\nprogram=\"CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C\"\n\n[rules.foreign-cpi]\naction=\"alert\"\nwhy=\"w\"\n";
+    let q = Policy::parse(without).unwrap();
+    rules::foreign_cpi(&q, "pool", "sig", &[stranger], &mut out);
+    assert!(out.is_empty());
+}

@@ -43,7 +43,7 @@ pub struct VetArgs<'a> {
 
 /// Rules that history (watch rounds, backtests) can show firing falsely.
 fn history_checks(id: &str, protocol: Protocol) -> bool {
-    matches!(id, "solvency" | "share-value" | "failed-burst" | "program-upgrade") || (id == "reserve-outflow" && protocol == Protocol::RaydiumCpSwap)
+    matches!(id, "solvency" | "share-value" | "failed-burst" | "program-upgrade" | "reserve-drop" | "foreign-cpi") || (id == "reserve-outflow" && protocol == Protocol::RaydiumCpSwap)
 }
 
 pub fn today() -> String {
@@ -101,7 +101,7 @@ pub fn vet(rpc: &Rpc, path: &str, args: &VetArgs) -> Result<(Vec<RuleVerdict>, S
     // 3. Live state, every protocol.
     if args.rounds > 0 {
         let mut buf: Vec<u8> = Vec::new();
-        monitor::watch(rpc, policy, WatchArgs { pools: args.pools, interval_secs: args.interval_secs, rounds: Some(args.rounds), max_tx_per_round: 25 }, &mut buf)?;
+        monitor::watch(rpc, policy, WatchArgs { pools: args.pools, interval_secs: args.interval_secs, rounds: Some(args.rounds), max_tx_per_round: 25, alert_url: None }, &mut buf)?;
         for line in String::from_utf8_lossy(&buf).lines() {
             let v: serde_json::Value = serde_json::from_str(line)?;
             let id = static_id(v["rule"].as_str().unwrap_or(""));
@@ -153,7 +153,7 @@ fn positive_source(id: &str) -> &'static str {
 }
 
 fn static_id(rule: &str) -> &'static str {
-    const IDS: [&str; 9] = ["solvency", "share-value", "must-simulate", "reserve-outflow", "slippage-headroom", "program-allowlist", "program-upgrade", "compute-budget", "failed-burst"];
+    const IDS: [&str; 11] = ["solvency", "share-value", "must-simulate", "reserve-outflow", "slippage-headroom", "program-allowlist", "program-upgrade", "compute-budget", "failed-burst", "reserve-drop", "foreign-cpi"];
     IDS.iter().find(|i| **i == rule).copied().unwrap_or("unknown")
 }
 

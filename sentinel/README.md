@@ -38,7 +38,7 @@ $B policy $P                               # review: every rule, why, evidence, 
 $B check  --policy $P --tx <base64|@file>  # firewall: one pending transaction → decision
 $B replay --policy $P --signature <sig>    # firewall on a real past transaction, as if pending now
 $B drill  --policy $P --pool <pool> [--candidate-so other.so]   # fresh test cases, pass/fail
-$B watch  --policy $P --pool <pool>... [--interval 15] [--out findings.jsonl]
+$B watch  --policy $P --pool <pool>... [--interval 15] [--out findings.jsonl] [--alert-url <webhook>]
 $B backtest --policy $P --pool <pool> --limit 300
 $B trace  --signature <sig> [--from <victim>] [--hops 2] --report incident.md   # follow the funds
 $B vet    --policy draft.toml --pool <pool>... [--candidate-so other.so]          # measure every rule
@@ -75,6 +75,8 @@ the policy file that produced it.
 | `compute-budget` | ✓ | | the transaction uses more than `max_units` |
 | `must-simulate` | ✓ | | the transaction fails against current state |
 | `failed-burst` | | ✓ | more than `max_failed` of the last `window` transactions on a pool failed (probing) |
+| `reserve-drop` | | ✓ | a reserve leg fell more than `max_bps` between monitor rounds (a drain or run spread across many transactions) |
+| `foreign-cpi` | | ✓ | a program outside the allowlist touched the pool in a recent transaction (abnormal CPI / unexpected integrator) |
 
 ## Drafted, vetted, signed
 

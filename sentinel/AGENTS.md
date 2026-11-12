@@ -46,6 +46,8 @@ You may not vet or sign.
 | `compute-budget` | `max_units` | alert |
 | `must-simulate` | none | block |
 | `failed-burst` | `window`, `max_failed` | alert |
+| `reserve-drop` | `max_bps` (between monitor rounds) | alert |
+| `foreign-cpi` | none (needs `program-allowlist`) | alert |
 
 For `program-upgrade`, take the hash from `sentinel drill` output
 ("program sha256 in fork") on the deployed program. Do not copy it from

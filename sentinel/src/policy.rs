@@ -108,6 +108,14 @@ pub struct Rules {
     pub compute_budget: Option<Units>,
     pub must_simulate: Option<Basic>,
     pub failed_burst: Option<Burst>,
+    /// Early warning: a pool's total reserves fell more than `max_bps` between
+    /// monitor rounds. Catches a drain or a run spread across many
+    /// transactions, which the per-instruction `reserve-outflow` rule misses.
+    pub reserve_drop: Option<Bps>,
+    /// Early warning: a program outside `program_allowlist` appears in a pool's
+    /// recent transactions (an unexpected integrator or an abnormal CPI).
+    /// Requires `program_allowlist` to be set.
+    pub foreign_cpi: Option<Basic>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -205,6 +213,8 @@ impl Policy {
         info!("program-upgrade", &r.program_upgrade, |b: &Pin| format!("sha256 {}…", &b.sha256[..b.sha256.len().min(12)]));
         info!("compute-budget", &r.compute_budget, |b: &Units| format!("max {} units", b.max_units));
         info!("failed-burst", &r.failed_burst, |b: &Burst| format!("more than {} of last {}", b.max_failed, b.window));
+        info!("reserve-drop", &r.reserve_drop, |b: &Bps| format!("max {} bps between rounds", b.max_bps));
+        info!("foreign-cpi", &r.foreign_cpi, |_: &Basic| String::new());
         out
     }
 }
